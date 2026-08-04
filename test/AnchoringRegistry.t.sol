@@ -3,10 +3,10 @@ pragma solidity ^0.8.23;
 
 import { Test } from "forge-std/Test.sol";
 import { Ownable } from "solady/auth/Ownable.sol";
-import { LibClone } from "solady/utils/LibClone.sol";
 
 import { AnchoringRegistry } from "../src/AnchoringRegistry.sol";
 import { ANCHORING_ADDRESS, IAnchoring } from "../src/interfaces/IAnchoring.sol";
+import { AnchoringDeployer } from "./support/AnchoringDeployer.sol";
 import { MockAnchoring } from "./support/MockAnchoring.sol";
 
 /// @dev A trivial V2 to prove upgrades preserve storage and swap logic.
@@ -19,8 +19,9 @@ contract AnchoringRegistryV2 is AnchoringRegistry {
 contract AnchoringRegistryTest is Test {
     AnchoringRegistry reg;
 
-    bytes32 constant ADMIN = "admin";
-    bytes32 constant EDITOR = "editor";
+    // Pinned to the contract's constants in setUp, so they can never drift from the source.
+    bytes32 ADMIN;
+    bytes32 EDITOR;
 
     address owner = makeAddr("safe"); // Safe multisig stand-in: upgrade authority + break-glass
     address creator = makeAddr("creator");
@@ -31,9 +32,13 @@ contract AnchoringRegistryTest is Test {
         // The precompile is enshrined on-chain; in forge it's the mock, etched at its address.
         vm.etch(ANCHORING_ADDRESS, address(new MockAnchoring()).code);
 
-        address impl = address(new AnchoringRegistry());
-        reg = AnchoringRegistry(LibClone.deployERC1967(impl));
-        reg.initialize(owner);
+        // Deploy through the shipped one-shot deployer so the recipe vendored into e2e is the
+        // one under test; the pranked CREATE makes `owner` the deployer's msg.sender.
+        vm.prank(owner);
+        reg = new AnchoringDeployer().registry();
+
+        ADMIN = reg.ROLE_ADMIN();
+        EDITOR = reg.ROLE_EDITOR();
     }
 
     function addRegistry(address as_, string memory name) internal returns (uint256) {
@@ -75,6 +80,8 @@ contract AnchoringRegistryTest is Test {
     }
 
     function test_sameChecksum_keepsRecordIdAndBumpsIndex() public {
+        // The version index inside the envelope keeps digests distinct, so the precompile's
+        // no-op rule never fires for a re-anchored identical record.
         uint256 id = addRegistry(creator, "docs");
         (uint256 r1, uint256 i1) = addRecord(creator, id, "abc");
         (uint256 r2, uint256 i2) = addRecord(creator, id, "abc");
@@ -82,15 +89,6 @@ contract AnchoringRegistryTest is Test {
         assertEq(i1, 1);
         assertEq(i2, 2);
         assertEq(reg.versionCount(id, r1), 2);
-    }
-
-    function test_identicalContent_isANewVersion_notANoOpRevert() public {
-        // The version index inside the envelope keeps digests distinct, so the precompile's
-        // no-op rule never fires for a re-anchored identical record.
-        uint256 id = addRegistry(creator, "docs");
-        (, uint256 i1) = addRecord(creator, id, "abc");
-        (, uint256 i2) = addRecord(creator, id, "abc");
-        assertEq(i1 + 1, i2);
     }
 
     function test_checksumStreams_arePerRegistry() public {
@@ -105,15 +103,13 @@ contract AnchoringRegistryTest is Test {
 
     function test_addRecord_requiresARole() public {
         uint256 id = addRegistry(creator, "docs");
-        vm.prank(stranger);
         vm.expectRevert(Ownable.Unauthorized.selector);
-        reg.addRecord(id, "ipfs://a", "abc", "sha256", "{}");
+        addRecord(stranger, id, "abc");
     }
 
     function test_addRecord_unknownRegistryReverts() public {
-        vm.prank(creator);
         vm.expectRevert(abi.encodeWithSelector(AnchoringRegistry.RegistryNotFound.selector, 99));
-        reg.addRecord(99, "ipfs://a", "abc", "sha256", "{}");
+        addRecord(creator, 99, "abc");
     }
 
     // -- RBAC ----------------------------------------------------------------
@@ -130,9 +126,8 @@ contract AnchoringRegistryTest is Test {
 
         vm.prank(creator);
         reg.revokeRole(id, "", editor, EDITOR);
-        vm.prank(editor);
         vm.expectRevert(Ownable.Unauthorized.selector);
-        reg.addRecord(id, "ipfs://a", "def", "sha256", "{}");
+        addRecord(editor, id, "def");
     }
 
     function test_recordRole_isScopedToItsChecksumAndRegistry() public {
@@ -149,13 +144,11 @@ contract AnchoringRegistryTest is Test {
 
         addRecord(editor, a, "shared"); // its own scope: ok
 
-        vm.prank(editor);
         vm.expectRevert(Ownable.Unauthorized.selector);
-        reg.addRecord(a, "ipfs://a", "other", "sha256", "{}"); // other checksum: no
+        addRecord(editor, a, "other"); // other checksum: no
 
-        vm.prank(editor);
         vm.expectRevert(Ownable.Unauthorized.selector);
-        reg.addRecord(b, "ipfs://a", "shared", "sha256", "{}"); // other registry: no
+        addRecord(editor, b, "shared"); // other registry: no
     }
 
     function test_grantRole_requiresTheScopeToExist() public {
@@ -185,7 +178,7 @@ contract AnchoringRegistryTest is Test {
         reg.grantRole(id, "", editor, ADMIN);
         vm.prank(editor);
         reg.revokeRole(id, "", creator, ADMIN);
-        assertFalse(reg.hasRole(1, "", creator, ADMIN));
+        assertFalse(reg.hasRole(id, "", creator, ADMIN));
     }
 
     function test_owner_breakGlass_grantsRegistryAdminOnly() public {
