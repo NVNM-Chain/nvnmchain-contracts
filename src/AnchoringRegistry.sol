@@ -11,10 +11,11 @@ import { ANCHORING_ADDRESS, IAnchoring } from "./interfaces/IAnchoring.sol";
 /// @notice Registries of checksum records, versioned per checksum, with scoped RBAC — anchored
 ///         through the anchoring precompile rather than stored here. This contract keeps only
 ///         what authorization and id assignment need (counters and role membership); every
-///         registry, record version, status, and ACL change is committed into the precompile's
-///         log under this contract's namespace, so `IAnchoring.latest(address(this), key)` is
-///         the on-chain source of truth and indexers reconstruct everything from `Anchored`
-///         events.
+///         registry, record version, and status is committed into the precompile's log under
+///         this contract's namespace, so `IAnchoring.latest(address(this), key)` is the
+///         on-chain source of truth and indexers reconstruct that history from `Anchored`
+///         events. ACL changes are not anchored: role history lives only in this contract's
+///         `RoleGranted`/`RoleRevoked` events.
 /// @dev UUPS proxy; `owner` (a Safe) is the upgrade authority and the break-glass admin: it may
 ///      grant a registry-level `admin` without holding one, which is what keeps the last-admin
 ///      rule recoverable. Storage is ERC-7201-namespaced.
@@ -38,15 +39,13 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         mapping(uint256 => uint256) recordCount;
         // registryId => keccak(checksum) => recordId (0 = none)
         mapping(uint256 => mapping(bytes32 => uint256)) recordIdByChecksum;
-        // registryId => recordId => keccak(checksum), for status-update authorization
-        mapping(uint256 => mapping(uint256 => bytes32)) checksumByRecord;
         // registryId => recordId => latest index (1-based)
         mapping(uint256 => mapping(uint256 => uint256)) versionCount;
         // roleId => account => member
         mapping(bytes32 => mapping(address => bool)) member;
         // registryId => registry-level admin count, so last-admin protection is O(1)
         mapping(uint256 => uint256) adminCount;
-        // discriminator for status/ACL envelopes, so idempotent re-assertions never
+        // discriminator for status envelopes, so idempotent re-assertions never
         // collide with the precompile's no-op rule
         uint256 seq;
     }
@@ -118,14 +117,15 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         return keccak256(abi.encode("role:registry", registryId, role));
     }
 
-    /// @notice Record-level role id: scoped by registry *and* checksum, so a grant in one
-    ///         registry never authorizes another registry sharing the same checksum.
-    function recordRole(uint256 registryId, bytes32 checksumHash, bytes32 role)
+    /// @notice Record-level role id: scoped by registry *and* record stream (within a registry
+    ///         the checksum↔recordId map is a bijection), so a grant in one registry never
+    ///         authorizes another registry sharing the same checksum.
+    function recordRole(uint256 registryId, uint256 recordId, bytes32 role)
         public
         pure
         returns (bytes32)
     {
-        return keccak256(abi.encode("role:record", registryId, checksumHash, role));
+        return keccak256(abi.encode("role:record", registryId, recordId, role));
     }
 
     // -- registries ----------------------------------------------------------
@@ -166,18 +166,18 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
     ) external returns (uint256 recordId, uint256 index) {
         if (bytes(checksum).length == 0) revert EmptyChecksum();
         if (bytes(uri).length == 0) revert EmptyUri();
+        _requireRegistry(registryId);
 
         AnchoringStorage storage $ = _s();
-        if (registryId == 0 || registryId > $.registryCount) revert RegistryNotFound(registryId);
-
         bytes32 checksumHash = keccak256(bytes(checksum));
-        _checkWriter(registryId, checksumHash);
-
         recordId = $.recordIdByChecksum[registryId][checksumHash];
+        // recordId 0 (a brand-new stream) matches no record-scoped grant: roles are only
+        // grantable against existing streams, so a first version needs a registry-level role.
+        _checkWriter(registryId, recordId);
+
         if (recordId == 0) {
             recordId = ++$.recordCount[registryId];
             $.recordIdByChecksum[registryId][checksumHash] = recordId;
-            $.checksumByRecord[registryId][recordId] = checksumHash;
         }
         index = ++$.versionCount[registryId][recordId];
 
@@ -198,9 +198,9 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         emit RecordAdded(registryId, recordId, index, checksum);
     }
 
-    /// @notice Anchors a status for one record version. Requires `admin` or `editor`; the
-    ///         record scope comes from the stream's checksum. Idempotent: the envelope carries
-    ///         a sequence number, so re-asserting the current status is a fresh anchor.
+    /// @notice Anchors a status for one record version. Requires `admin` or `editor` at record
+    ///         or registry scope. Idempotent: the envelope carries a sequence number, so
+    ///         re-asserting the current status is a fresh anchor.
     function updateRecordStatus(
         uint256 registryId,
         uint256 recordId,
@@ -211,7 +211,7 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         if (index == 0 || index > $.versionCount[registryId][recordId]) {
             revert RecordNotFound(registryId, recordId, index);
         }
-        _checkWriter(registryId, $.checksumByRecord[registryId][recordId]);
+        _checkWriter(registryId, recordId);
 
         IAnchoring(ANCHORING_ADDRESS)
             .anchorAndHash(
@@ -229,19 +229,19 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
     function grantRole(uint256 registryId, string calldata checksum, address account, bytes32 role)
         external
     {
-        bytes32 roleId = _scopedRole(registryId, checksum, role);
-
-        bool breakGlass = msg.sender == owner() && role == ROLE_ADMIN && bytes(checksum).length == 0;
-        if (!breakGlass && !_s().member[registryRole(registryId, ROLE_ADMIN)][msg.sender]) {
-            revert Unauthorized();
-        }
+        (bytes32 roleId, bytes32 checksumHash, bool registryScope) =
+            _scopedRole(registryId, checksum, role);
+        bool registryAdmin = registryScope && role == ROLE_ADMIN;
 
         AnchoringStorage storage $ = _s();
+        bool breakGlass = registryAdmin && msg.sender == owner();
+        if (!breakGlass && !_isRegistryAdmin(registryId)) revert Unauthorized();
+
         if (!$.member[roleId][account]) {
             $.member[roleId][account] = true;
-            if (role == ROLE_ADMIN && bytes(checksum).length == 0) $.adminCount[registryId]++;
+            if (registryAdmin) $.adminCount[registryId]++;
         }
-        emit RoleGranted(registryId, keccak256(bytes(checksum)), account, role);
+        emit RoleGranted(registryId, checksumHash, account, role);
     }
 
     /// @notice Revokes a role. The last registry-level admin cannot be revoked — recover by
@@ -250,18 +250,19 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
     function revokeRole(uint256 registryId, string calldata checksum, address account, bytes32 role)
         external
     {
-        bytes32 roleId = _scopedRole(registryId, checksum, role);
+        (bytes32 roleId, bytes32 checksumHash, bool registryScope) =
+            _scopedRole(registryId, checksum, role);
 
         AnchoringStorage storage $ = _s();
-        if (!$.member[registryRole(registryId, ROLE_ADMIN)][msg.sender]) revert Unauthorized();
+        if (!_isRegistryAdmin(registryId)) revert Unauthorized();
         if (!$.member[roleId][account]) revert MissingRole(account, role);
 
-        if (role == ROLE_ADMIN && bytes(checksum).length == 0) {
+        if (registryScope && role == ROLE_ADMIN) {
             if ($.adminCount[registryId] <= 1) revert LastAdmin();
             $.adminCount[registryId]--;
         }
         $.member[roleId][account] = false;
-        emit RoleRevoked(registryId, keccak256(bytes(checksum)), account, role);
+        emit RoleRevoked(registryId, checksumHash, account, role);
     }
 
     // -- views ---------------------------------------------------------------
@@ -290,10 +291,8 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         view
         returns (bool)
     {
-        bytes32 roleId = bytes(checksum).length == 0
-            ? registryRole(registryId, role)
-            : recordRole(registryId, keccak256(bytes(checksum)), role);
-        return _s().member[roleId][account];
+        (bytes32 roleId,,) = _resolveRole(registryId, checksum, role);
+        return roleId != 0 && _s().member[roleId][account];
     }
 
     /// @notice The latest anchored digest for a record stream — verifiable against the
@@ -307,33 +306,58 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
     }
 
     // -- internals -----------------------------------------------------------
-    /// @dev `admin` or `editor`, record scope first, then registry scope.
-    function _checkWriter(uint256 registryId, bytes32 checksumHash) private view {
+    /// @dev Ids are 1-based and dense, so this is the definition of "the registry exists".
+    function _requireRegistry(uint256 registryId) private view {
+        if (registryId == 0 || registryId > _s().registryCount) {
+            revert RegistryNotFound(registryId);
+        }
+    }
+
+    /// @dev The caller holds the registry-level `admin` role.
+    function _isRegistryAdmin(uint256 registryId) private view returns (bool) {
+        return _s().member[registryRole(registryId, ROLE_ADMIN)][msg.sender];
+    }
+
+    /// @dev `admin` or `editor`, registry scope first (the common case — every first version
+    ///      is necessarily written by a registry-scoped holder), then record scope.
+    function _checkWriter(uint256 registryId, uint256 recordId) private view {
         AnchoringStorage storage $ = _s();
-        if ($.member[recordRole(registryId, checksumHash, ROLE_ADMIN)][msg.sender]) return;
-        if ($.member[recordRole(registryId, checksumHash, ROLE_EDITOR)][msg.sender]) return;
-        if ($.member[registryRole(registryId, ROLE_ADMIN)][msg.sender]) return;
+        if (_isRegistryAdmin(registryId)) return;
         if ($.member[registryRole(registryId, ROLE_EDITOR)][msg.sender]) return;
+        if ($.member[recordRole(registryId, recordId, ROLE_ADMIN)][msg.sender]) return;
+        if ($.member[recordRole(registryId, recordId, ROLE_EDITOR)][msg.sender]) return;
         revert Unauthorized();
+    }
+
+    /// @dev Derives the scoped role id without validating existence: `roleId == 0` means record
+    ///      scope with no stream for the checksum. The one place scope is decided — callers
+    ///      reuse `checksumHash` (events) and `registryScope` (admin-count bookkeeping).
+    function _resolveRole(uint256 registryId, string calldata checksum, bytes32 role)
+        private
+        view
+        returns (bytes32 roleId, bytes32 checksumHash, bool registryScope)
+    {
+        registryScope = bytes(checksum).length == 0;
+        checksumHash = keccak256(bytes(checksum));
+        if (registryScope) {
+            roleId = registryRole(registryId, role);
+        } else {
+            uint256 recordId = _s().recordIdByChecksum[registryId][checksumHash];
+            if (recordId != 0) roleId = recordRole(registryId, recordId, role);
+        }
     }
 
     /// @dev Validates the role and the scope's existence, then derives the scoped role id.
     function _scopedRole(uint256 registryId, string calldata checksum, bytes32 role)
         private
         view
-        returns (bytes32)
+        returns (bytes32 roleId, bytes32 checksumHash, bool registryScope)
     {
         if (role != ROLE_ADMIN && role != ROLE_EDITOR) revert InvalidRole(role);
+        _requireRegistry(registryId);
 
-        AnchoringStorage storage $ = _s();
-        if (registryId == 0 || registryId > $.registryCount) revert RegistryNotFound(registryId);
-        if (bytes(checksum).length == 0) return registryRole(registryId, role);
-
-        bytes32 checksumHash = keccak256(bytes(checksum));
-        if ($.recordIdByChecksum[registryId][checksumHash] == 0) {
-            revert NoRecordForChecksum(registryId, checksumHash);
-        }
-        return recordRole(registryId, checksumHash, role);
+        (roleId, checksumHash, registryScope) = _resolveRole(registryId, checksum, role);
+        if (roleId == 0) revert NoRecordForChecksum(registryId, checksumHash);
     }
 
     function _authorizeUpgrade(address) internal override onlyOwner { }

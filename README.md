@@ -6,11 +6,12 @@ Application contracts for NVM, built on the anchoring precompile enshrined in th
 
 Named registries of versioned checksum records, with scoped role-based access control.
 
-The contract anchors rather than stores: every registry, record version, status, and ACL
-change is committed through the anchoring precompile at `0x…0a00` under this contract's own
-address, so `IAnchoring.latest(registry, key)` is the on-chain source of truth and indexers
-rebuild history from `Anchored` events. Only what authorization and id assignment need —
-counters and role membership — lives in contract storage.
+The contract anchors rather than stores: every registry, record version, and status is
+committed through the anchoring precompile at `0x…0a00` under this contract's own address,
+so `IAnchoring.latest(registry, key)` is the on-chain source of truth and indexers rebuild
+that history from `Anchored` events. ACL changes are not anchored — role history lives only
+in this contract's `RoleGranted`/`RoleRevoked` events. Only what authorization and id
+assignment need — counters and role membership — lives in contract storage.
 
 Roles are registry-scoped or record-scoped (one checksum within one registry) over `admin`
 and `editor`; a grant in one registry never authorizes another sharing the same checksum.
