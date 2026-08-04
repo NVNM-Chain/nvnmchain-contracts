@@ -8,6 +8,9 @@ test = "test"
 libs = ["lib"]
 via-ir = true
 optimizer = true
+# The impl deploys once behind a proxy and is called for the life of the system —
+# tune for runtime gas, not deploy size.
+optimizer_runs = 10_000
 extra_output = ["storageLayout"]
 # solady/forge-std pinned as git submodules (same commits as tips/verify/lib).
 remappings = [
