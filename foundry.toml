@@ -1,0 +1,22 @@
+[profile.default]
+# Pinned so the bytecode vendored into tempo-e2e is reproducible across machines.
+solc = "0.8.28"
+evm_version = "cancun"
+src = "src"
+out = "out"
+test = "test"
+libs = ["lib"]
+via-ir = true
+optimizer = true
+extra_output = ["storageLayout"]
+# solady/forge-std pinned as git submodules (same commits as tips/verify/lib).
+remappings = [
+    "solady/=lib/solady/src/",
+    "forge-std/=lib/forge-std/src/",
+]
+
+[fmt]
+line_length = 100
+sort_imports = true
+bracket_spacing = true
+number_underscore = "thousands"
