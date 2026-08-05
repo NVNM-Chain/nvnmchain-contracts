@@ -95,6 +95,14 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         _initializeOwner(owner_);
     }
 
+    // -- envelope kinds -------------------------------------------------------
+    /// @dev Every anchored envelope leads with one of these, so an indexer can classify a
+    ///      payload from the log alone rather than having to match it against a derived key.
+    bytes32 public constant KIND_REGISTRY = "registry";
+    bytes32 public constant KIND_RECORD = "record";
+    bytes32 public constant KIND_STATUS = "status";
+    bytes32 public constant KIND_ACL = "acl";
+
     // -- key and role derivation (public, so indexers derive identically) ----
     function registryKey(uint256 id) public pure returns (bytes32) {
         return keccak256(abi.encode("registry", id));
@@ -110,6 +118,16 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         returns (bytes32)
     {
         return keccak256(abi.encode("status", registryId, recordId, index));
+    }
+
+    /// @notice The key an ACL change is anchored under. ``latest(registry, aclKey(...))``
+    ///         is the live state of one grant, provable without reading contract storage.
+    function aclKey(uint256 registryId, bytes32 checksumHash, address account, bytes32 role)
+        public
+        pure
+        returns (bytes32)
+    {
+        return keccak256(abi.encode("acl", registryId, checksumHash, account, role));
     }
 
     /// @notice Registry-level role id.
@@ -147,7 +165,9 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         IAnchoring(ANCHORING_ADDRESS)
             .anchorAndHash(
                 registryKey(id),
-                abi.encode(id, name, description, metadata, msg.sender, block.timestamp)
+                abi.encode(
+                    KIND_REGISTRY, id, name, description, metadata, msg.sender, block.timestamp
+                )
             );
         emit RegistryAdded(id, name, msg.sender);
     }
@@ -185,6 +205,7 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
             .anchorAndHash(
                 recordKey(registryId, recordId),
                 abi.encode(
+                    KIND_RECORD,
                     registryId,
                     recordId,
                     index,
@@ -216,7 +237,7 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         IAnchoring(ANCHORING_ADDRESS)
             .anchorAndHash(
                 statusKey(registryId, recordId, index),
-                abi.encode(registryId, recordId, index, status, ++$.seq)
+                abi.encode(KIND_STATUS, registryId, recordId, index, status, ++$.seq)
             );
         emit RecordStatusUpdated(registryId, recordId, index, status);
     }

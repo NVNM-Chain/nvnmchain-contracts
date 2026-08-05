@@ -74,8 +74,17 @@ contract AnchoringRegistryTest is Test {
         assertEq(index, 1);
 
         // The head is the digest of the exact envelope the event carried.
-        bytes memory envelope =
-            abi.encode(id, recordId, index, "ipfs://a", "abc", "sha256", "{}", block.timestamp);
+        bytes memory envelope = abi.encode(
+            reg.KIND_RECORD(),
+            id,
+            recordId,
+            index,
+            "ipfs://a",
+            "abc",
+            "sha256",
+            "{}",
+            block.timestamp
+        );
         assertEq(reg.latestRecordDigest(id, recordId), keccak256(envelope));
     }
 
@@ -110,6 +119,24 @@ contract AnchoringRegistryTest is Test {
     function test_addRecord_unknownRegistryReverts() public {
         vm.expectRevert(abi.encodeWithSelector(AnchoringRegistry.RegistryNotFound.selector, 99));
         addRecord(creator, 99, "abc");
+    }
+
+    function test_everyEnvelopeLeadsWithItsKind() public {
+        // An indexer classifies a payload from the log alone, without deriving keys first.
+        uint256 id = addRegistry(creator, "docs");
+        (uint256 recordId, uint256 index) = addRecord(creator, id, "abc");
+        vm.prank(creator);
+        reg.updateRecordStatus(id, recordId, index, "redacted");
+
+        bytes32[3] memory keys =
+            [reg.registryKey(id), reg.recordKey(id, recordId), reg.statusKey(id, recordId, index)];
+        bytes32[3] memory kinds = [reg.KIND_REGISTRY(), reg.KIND_RECORD(), reg.KIND_STATUS()];
+
+        for (uint256 i; i < keys.length; i++) {
+            bytes memory envelope =
+                MockAnchoring(ANCHORING_ADDRESS).metadataOf(address(reg), keys[i]);
+            assertEq(abi.decode(envelope, (bytes32)), kinds[i]);
+        }
     }
 
     // -- RBAC ----------------------------------------------------------------
