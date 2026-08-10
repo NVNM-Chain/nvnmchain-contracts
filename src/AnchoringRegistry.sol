@@ -11,11 +11,11 @@ import { ANCHORING_ADDRESS, IAnchoring } from "./interfaces/IAnchoring.sol";
 /// @notice Registries of checksum records, versioned per checksum, with scoped RBAC — anchored
 ///         through the anchoring precompile rather than stored here. This contract keeps only
 ///         what authorization and id assignment need (counters and role membership); every
-///         registry, record version, and status is committed into the precompile's log under
-///         this contract's namespace, so `IAnchoring.latest(address(this), key)` is the
-///         on-chain source of truth and indexers reconstruct that history from `Anchored`
-///         events. ACL changes are not anchored: role history lives only in this contract's
-///         `RoleGranted`/`RoleRevoked` events.
+///         registry, record version, status, and role change is committed into the precompile's
+///         log under this contract's namespace, so `IAnchoring.latest(address(this), key)` is
+///         the on-chain source of truth and indexers reconstruct that history — permissions
+///         included — from `Anchored` events alone. The `RoleGranted`/`RoleRevoked` events are
+///         the same facts in readable form, for consumers already following this contract.
 /// @dev UUPS proxy; `owner` (a Safe) is the upgrade authority and the break-glass admin: it may
 ///      grant a registry-level `admin` without holding one, which is what keeps the last-admin
 ///      rule recoverable. Storage is ERC-7201-namespaced.
@@ -261,6 +261,7 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
         if (!$.member[roleId][account]) {
             $.member[roleId][account] = true;
             if (registryAdmin) $.adminCount[registryId]++;
+            _anchorAcl(registryId, checksumHash, account, role, true);
         }
         emit RoleGranted(registryId, checksumHash, account, role);
     }
@@ -283,6 +284,7 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
             $.adminCount[registryId]--;
         }
         $.member[roleId][account] = false;
+        _anchorAcl(registryId, checksumHash, account, role, false);
         emit RoleRevoked(registryId, checksumHash, account, role);
     }
 
@@ -337,6 +339,27 @@ contract AnchoringRegistry is UUPSUpgradeable, Initializable, Ownable {
     /// @dev The caller holds the registry-level `admin` role.
     function _isRegistryAdmin(uint256 registryId) private view returns (bool) {
         return _s().member[registryRole(registryId, ROLE_ADMIN)][msg.sender];
+    }
+
+    /// @dev Anchors one grant's new state, so an indexer rebuilds permissions from the log
+    ///      rather than from this contract's events.
+    ///
+    ///      Only reached when membership actually changed. Anchoring an unchanged grant would
+    ///      re-anchor an identical envelope and revert `CommitmentUnchanged`, turning a
+    ///      repeated grant from a no-op into a failure. No sequence number is needed: the
+    ///      no-op rule compares against the current head, and granted/revoked alternate.
+    function _anchorAcl(
+        uint256 registryId,
+        bytes32 checksumHash,
+        address account,
+        bytes32 role,
+        bool granted
+    ) private {
+        IAnchoring(ANCHORING_ADDRESS)
+            .anchorAndHash(
+                aclKey(registryId, checksumHash, account, role),
+                abi.encode(KIND_ACL, registryId, checksumHash, account, role, granted)
+            );
     }
 
     /// @dev `admin` or `editor`, registry scope first (the common case — every first version

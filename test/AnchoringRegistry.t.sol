@@ -248,6 +248,43 @@ contract AnchoringRegistryTest is Test {
         reg.grantRole(id, "", editor, "root");
     }
 
+    function test_aclChangesAreAnchored() public {
+        uint256 id = addRegistry(creator, "docs");
+        bytes32 key = reg.aclKey(id, keccak256(""), editor, EDITOR);
+        IAnchoring anchoring = IAnchoring(ANCHORING_ADDRESS);
+
+        vm.prank(creator);
+        reg.grantRole(id, "", editor, EDITOR);
+        bytes32 granted = anchoring.latest(address(reg), key);
+        assertEq(
+            granted, keccak256(abi.encode(reg.KIND_ACL(), id, keccak256(""), editor, EDITOR, true))
+        );
+
+        vm.prank(creator);
+        reg.revokeRole(id, "", editor, EDITOR);
+        assertEq(
+            anchoring.latest(address(reg), key),
+            keccak256(abi.encode(reg.KIND_ACL(), id, keccak256(""), editor, EDITOR, false))
+        );
+
+        // Re-granting returns the head to its earlier value: the no-op rule compares against
+        // the current head, not history, so alternating states never collide.
+        vm.prank(creator);
+        reg.grantRole(id, "", editor, EDITOR);
+        assertEq(anchoring.latest(address(reg), key), granted);
+    }
+
+    function test_repeatedGrantStaysANoOpOnceAnchored() public {
+        // Anchoring an unchanged grant would revert CommitmentUnchanged, so the anchor sits
+        // inside the membership check rather than at the top of grantRole.
+        uint256 id = addRegistry(creator, "docs");
+        for (uint256 i; i < 3; i++) {
+            vm.prank(creator);
+            reg.grantRole(id, "", editor, EDITOR);
+        }
+        assertTrue(reg.hasRole(id, "", editor, EDITOR));
+    }
+
     // -- status --------------------------------------------------------------
     function test_updateRecordStatus_isIdempotentAndAnchored() public {
         uint256 id = addRegistry(creator, "docs");

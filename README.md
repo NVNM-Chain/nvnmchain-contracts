@@ -1,4 +1,4 @@
-# nvnm-contracts
+# nvnmchain-contracts
 
 Application contracts for NVM, built on the anchoring precompile enshrined in the node.
 
@@ -6,12 +6,19 @@ Application contracts for NVM, built on the anchoring precompile enshrined in th
 
 Named registries of versioned checksum records, with scoped role-based access control.
 
-The contract anchors rather than stores: every registry, record version, and status is
-committed through the anchoring precompile at `0x…0a00` under this contract's own address,
-so `IAnchoring.latest(registry, key)` is the on-chain source of truth and indexers rebuild
-that history from `Anchored` events. ACL changes are not anchored — role history lives only
-in this contract's `RoleGranted`/`RoleRevoked` events. Only what authorization and id
-assignment need — counters and role membership — lives in contract storage.
+The contract anchors rather than stores: every registry, record version, status and role
+change is committed through the anchoring precompile at `0x…0a00` under this contract's own
+address, so `IAnchoring.latest(registry, key)` is the on-chain source of truth and indexers
+rebuild that history — permissions included — from `Anchored` events alone. The
+`RoleGranted`/`RoleRevoked` events carry the same facts in readable form. Only what
+authorization and id assignment need — counters and role membership — lives in contract
+storage.
+
+Every envelope leads with a `bytes32` kind (`registry`, `record`, `status`, `acl`), so an
+indexer classifies a payload from the log rather than by matching it against a derived key.
+Record and status envelopes stay distinct per version — the version `index`, and a sequence
+number for status — so re-anchoring identical content is a new version rather than a
+`CommitmentUnchanged` revert. A repeated grant changes nothing and so anchors nothing.
 
 Roles are registry-scoped or record-scoped (one checksum within one registry) over `admin`
 and `editor`; a grant in one registry never authorizes another sharing the same checksum.
