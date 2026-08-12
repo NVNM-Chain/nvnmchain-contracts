@@ -14,23 +14,21 @@ interface IOwned {
 /// @title Registry
 /// @notice One registry of checksum records, versioned per checksum, with scoped RBAC —
 ///         anchored through the anchoring precompile rather than stored here. This contract
-///         keeps only what authorization and id assignment need (counters and role
-///         membership); every record version and status is committed into the precompile's
-///         log under *this contract's* address, so `IAnchoring.latest(address(this), key)` is
-///         the on-chain source of truth.
+///         keeps only role membership and a version count per record; every version and status
+///         is committed into the precompile's log under *this contract's* address, so
+///         `IAnchoring.latest(address(this), key)` is the on-chain source of truth.
 /// @dev One deployment per registry, from {RegistryFactory}. That is the whole reason this
 ///      contract has no `registryId`: the precompile is a caller-partitioned log, so the
 ///      deployment address *is* the partition, and a payload is only meaningful with the
 ///      namespace it was anchored under beside it.
 ///
+///      A record has no id either: `keccak256(checksum)` *is* its identity, which is what
+///      `addRecord` already looked one up by. Numbering is log order, an indexer's job.
+///
 ///      Roles are registry-scoped (this whole contract — the role is its own id, no derivation)
 ///      or record-scoped (one checksum within it), over `admin` and `editor`. They are *not*
 ///      anchored: membership is this contract's state, history is `RoleGranted`/`RoleRevoked`,
 ///      and a third copy in the anchored log would only be something to drift.
-///
-///      There is no record-count getter. `recordCount` mints ids and nothing else reads it:
-///      "how many records" and "list them in order" are `RecordAdded` replayed by an indexer,
-///      the same split the factory makes for the set of registries.
 ///
 ///      Behind a beacon proxy, so the factory upgrades every registry at once. Break-glass
 ///      admin is read through the factory rather than copied here, so transferring ownership
@@ -54,12 +52,8 @@ contract Registry is Initializable {
     struct RegistryStorage {
         // the factory, read for `owner()` — its owner is the break-glass admin
         address factory;
-        // 1-based recordId
-        uint256 recordCount;
-        // keccak(checksum) => recordId (0 = none)
-        mapping(bytes32 => uint256) recordIdByChecksum;
-        // recordId => latest index (1-based)
-        mapping(uint256 => uint256) versionCount;
+        // keccak(checksum) => version count; 0 means no such record
+        mapping(bytes32 => uint256) versionCount;
         // roleId => account => member
         mapping(bytes32 => mapping(address => bool)) member;
         // registry-level admin count, so last-admin protection is O(1)
@@ -80,15 +74,15 @@ contract Registry is Initializable {
     }
 
     // -- events --------------------------------------------------------------
-    event RecordAdded(uint256 indexed recordId, uint256 index, string checksum);
-    event RecordStatusUpdated(uint256 indexed recordId, uint256 index, string status);
+    event RecordAdded(bytes32 indexed checksumHash, uint256 index, string checksum);
+    event RecordStatusUpdated(bytes32 indexed checksumHash, uint256 index, string status);
     event RoleGranted(bytes32 indexed checksumHash, address indexed account, bytes32 role);
     event RoleRevoked(bytes32 indexed checksumHash, address indexed account, bytes32 role);
 
     // -- errors --------------------------------------------------------------
     error EmptyChecksum();
     error EmptyUri();
-    error RecordNotFound(uint256 recordId, uint256 index);
+    error RecordNotFound(bytes32 checksumHash, uint256 index);
     error NoRecordForChecksum(bytes32 checksumHash);
     error InvalidRole(bytes32 role);
     error MissingRole(address account, bytes32 role);
@@ -108,18 +102,18 @@ contract Registry is Initializable {
     // -- keys ----------------------------------------------------------------
     /// @notice The key a record stream is anchored under. No registry id: this contract is
     ///         the registry, and `latest(address(this), key)` is already scoped to it.
-    function recordKey(uint256 recordId) public pure returns (bytes32) {
-        return keccak256(abi.encode("record", recordId));
+    function recordKey(bytes32 checksumHash) public pure returns (bytes32) {
+        return keccak256(abi.encode("record", checksumHash));
     }
 
-    function statusKey(uint256 recordId, uint256 index) public pure returns (bytes32) {
-        return keccak256(abi.encode("status", recordId, index));
+    function statusKey(bytes32 checksumHash, uint256 index) public pure returns (bytes32) {
+        return keccak256(abi.encode("status", checksumHash, index));
     }
 
     /// @notice Record-level role id, scoped by record stream. Registry-level roles need no
     ///         derivation — the role *is* the id — so there is no `registryRole`.
-    function recordRole(uint256 recordId, bytes32 role) public pure returns (bytes32) {
-        return keccak256(abi.encode("role:record", recordId, role));
+    function recordRole(bytes32 checksumHash, bytes32 role) public pure returns (bytes32) {
+        return keccak256(abi.encode("role:record", checksumHash, role));
     }
 
     // -- records -------------------------------------------------------------
@@ -132,29 +126,21 @@ contract Registry is Initializable {
         string calldata checksum,
         string calldata checksumAlgo,
         string calldata metadata
-    ) external returns (uint256 recordId, uint256 index) {
+    ) external returns (bytes32 checksumHash, uint256 index) {
         if (bytes(checksum).length == 0) revert EmptyChecksum();
         if (bytes(uri).length == 0) revert EmptyUri();
 
         RegistryStorage storage $ = _s();
-        bytes32 checksumHash = keccak256(bytes(checksum));
-        recordId = $.recordIdByChecksum[checksumHash];
-        // recordId 0 (a brand-new stream) matches no record-scoped grant: roles are only
-        // grantable against existing streams, so a first version needs a registry-level role.
-        _checkWriter(recordId);
-
-        if (recordId == 0) {
-            recordId = ++$.recordCount;
-            $.recordIdByChecksum[checksumHash] = recordId;
-        }
-        index = ++$.versionCount[recordId];
+        checksumHash = keccak256(bytes(checksum));
+        _checkWriter(checksumHash);
+        index = ++$.versionCount[checksumHash];
 
         IAnchoring(ANCHORING_ADDRESS)
             .anchorAndHash(
-                recordKey(recordId),
+                recordKey(checksumHash),
                 abi.encode(
                     KIND_RECORD,
-                    recordId,
+                    checksumHash,
                     index,
                     uri,
                     checksum,
@@ -163,25 +149,28 @@ contract Registry is Initializable {
                     block.timestamp
                 )
             );
-        emit RecordAdded(recordId, index, checksum);
+        emit RecordAdded(checksumHash, index, checksum);
     }
 
     /// @notice Anchors a status for one record version. Requires `admin` or `editor` at record
     ///         or registry scope. Idempotent: the envelope carries a sequence number, so
     ///         re-asserting the current status is a fresh anchor.
-    function updateRecordStatus(uint256 recordId, uint256 index, string calldata status) external {
+    function updateRecordStatus(string calldata checksum, uint256 index, string calldata status)
+        external
+    {
         RegistryStorage storage $ = _s();
-        if (index == 0 || index > $.versionCount[recordId]) {
-            revert RecordNotFound(recordId, index);
+        bytes32 checksumHash = keccak256(bytes(checksum));
+        if (index == 0 || index > $.versionCount[checksumHash]) {
+            revert RecordNotFound(checksumHash, index);
         }
-        _checkWriter(recordId);
+        _checkWriter(checksumHash);
 
         IAnchoring(ANCHORING_ADDRESS)
             .anchorAndHash(
-                statusKey(recordId, index),
-                abi.encode(KIND_STATUS, recordId, index, status, ++$.seq)
+                statusKey(checksumHash, index),
+                abi.encode(KIND_STATUS, checksumHash, index, status, ++$.seq)
             );
-        emit RecordStatusUpdated(recordId, index, status);
+        emit RecordStatusUpdated(checksumHash, index, status);
     }
 
     // -- RBAC ----------------------------------------------------------------
@@ -233,12 +222,8 @@ contract Registry is Initializable {
         return _s().factory;
     }
 
-    function recordIdForChecksum(string calldata checksum) external view returns (uint256) {
-        return _s().recordIdByChecksum[keccak256(bytes(checksum))];
-    }
-
-    function versionCount(uint256 recordId) external view returns (uint256) {
-        return _s().versionCount[recordId];
+    function versionCount(bytes32 checksumHash) external view returns (uint256) {
+        return _s().versionCount[checksumHash];
     }
 
     function hasRole(string calldata checksum, address account, bytes32 role)
@@ -252,8 +237,8 @@ contract Registry is Initializable {
 
     /// @notice The latest anchored digest for a record stream — verifiable against the
     ///         envelope in the corresponding `Anchored` event.
-    function latestRecordDigest(uint256 recordId) external view returns (bytes32) {
-        return IAnchoring(ANCHORING_ADDRESS).latest(address(this), recordKey(recordId));
+    function latestRecordDigest(bytes32 checksumHash) external view returns (bytes32) {
+        return IAnchoring(ANCHORING_ADDRESS).latest(address(this), recordKey(checksumHash));
     }
 
     // -- internals -----------------------------------------------------------
@@ -264,14 +249,12 @@ contract Registry is Initializable {
 
     /// @dev `admin` or `editor`, registry scope first (the common case — every first version
     ///      is necessarily written by a registry-scoped holder), then record scope.
-    function _checkWriter(uint256 recordId) private view {
+    function _checkWriter(bytes32 checksumHash) private view {
         RegistryStorage storage $ = _s();
         if (_isRegistryAdmin()) return;
         if ($.member[ROLE_EDITOR][msg.sender]) return;
-        if (recordId != 0) {
-            if ($.member[recordRole(recordId, ROLE_ADMIN)][msg.sender]) return;
-            if ($.member[recordRole(recordId, ROLE_EDITOR)][msg.sender]) return;
-        }
+        if ($.member[recordRole(checksumHash, ROLE_ADMIN)][msg.sender]) return;
+        if ($.member[recordRole(checksumHash, ROLE_EDITOR)][msg.sender]) return;
         revert Unauthorized();
     }
 
@@ -286,9 +269,8 @@ contract Registry is Initializable {
         checksumHash = keccak256(bytes(checksum));
         if (registryScope) {
             roleId = role;
-        } else {
-            uint256 recordId = _s().recordIdByChecksum[checksumHash];
-            if (recordId != 0) roleId = recordRole(recordId, role);
+        } else if (_s().versionCount[checksumHash] != 0) {
+            roleId = recordRole(checksumHash, role);
         }
     }
 

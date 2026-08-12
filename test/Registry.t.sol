@@ -52,7 +52,7 @@ contract RegistryTest is Test {
 
     function addRecord(address as_, Registry reg, string memory checksum)
         internal
-        returns (uint256 recordId, uint256 index)
+        returns (bytes32 checksumHash, uint256 index)
     {
         vm.prank(as_);
         return reg.addRecord("ipfs://a", checksum, "sha256", "{}");
@@ -98,16 +98,19 @@ contract RegistryTest is Test {
     function test_registriesAreSeparateNamespacesInTheLog() public {
         Registry a = Registry(deploy(creator, "a"));
         Registry b = Registry(deploy(creator, "b"));
-        addRecord(creator, a, "a-doc");
-        addRecord(creator, b, "b-doc");
+        // The same checksum in both, so the same key -- it derives from the checksum and
+        // nothing else. Differing uris keep the two heads apart.
+        vm.prank(creator);
+        a.addRecord("ipfs://in-a", "shared", "sha256", "{}");
+        vm.prank(creator);
+        b.addRecord("ipfs://in-b", "shared", "sha256", "{}");
 
-        // Both are recordId 1, so both anchor under the *same* key -- and neither overwrites
-        // the other, because the head is stored per (caller, key) and the caller differs.
         IAnchoring anchoring = IAnchoring(ANCHORING_ADDRESS);
-        bytes32 key = a.recordKey(1);
-        assertEq(key, b.recordKey(1), "the same key in both registries...");
-        assertEq(anchoring.latest(address(a), key), a.latestRecordDigest(1));
-        assertEq(anchoring.latest(address(b), key), b.latestRecordDigest(1));
+        bytes32 hash = keccak256("shared");
+        bytes32 key = a.recordKey(hash);
+        assertEq(key, b.recordKey(hash), "the same key in both registries...");
+        assertEq(anchoring.latest(address(a), key), a.latestRecordDigest(hash));
+        assertEq(anchoring.latest(address(b), key), b.latestRecordDigest(hash));
         assertTrue(
             anchoring.latest(address(a), key) != anchoring.latest(address(b), key),
             "...holding their own heads, because the caller is the partition"
@@ -115,39 +118,49 @@ contract RegistryTest is Test {
     }
 
     // -- records -------------------------------------------------------------
-    function test_addRecord_assignsIdsAndAnchorsSelfVerifyingDigest() public {
+    function test_addRecord_identifiesByChecksumAndAnchorsSelfVerifyingDigest() public {
         Registry reg = Registry(deploy(creator, "docs"));
-        (uint256 recordId, uint256 index) = addRecord(creator, reg, "abc");
-        assertEq(recordId, 1);
+        (bytes32 checksumHash, uint256 index) = addRecord(creator, reg, "abc");
+        assertEq(checksumHash, keccak256("abc"), "the checksum hash is the identity");
         assertEq(index, 1);
 
         // The head is the digest of the exact envelope the event carried.
         bytes memory envelope = abi.encode(
-            reg.KIND_RECORD(), recordId, index, "ipfs://a", "abc", "sha256", "{}", block.timestamp
+            reg.KIND_RECORD(),
+            checksumHash,
+            index,
+            "ipfs://a",
+            "abc",
+            "sha256",
+            "{}",
+            block.timestamp
         );
-        assertEq(reg.latestRecordDigest(recordId), keccak256(envelope));
+        assertEq(reg.latestRecordDigest(checksumHash), keccak256(envelope));
     }
 
-    function test_sameChecksum_keepsRecordIdAndBumpsIndex() public {
+    function test_sameChecksum_isOneStreamAndBumpsIndex() public {
         // The version index inside the envelope keeps digests distinct, so the precompile's
         // no-op rule never fires for a re-anchored identical record.
         Registry reg = Registry(deploy(creator, "docs"));
-        (uint256 r1, uint256 i1) = addRecord(creator, reg, "abc");
-        (uint256 r2, uint256 i2) = addRecord(creator, reg, "abc");
-        assertEq(r1, r2, "one stream per checksum");
+        (bytes32 h1, uint256 i1) = addRecord(creator, reg, "abc");
+        (bytes32 h2, uint256 i2) = addRecord(creator, reg, "abc");
+        assertEq(h1, h2, "one stream per checksum");
         assertEq(i1, 1);
         assertEq(i2, 2);
-        assertEq(reg.versionCount(r1), 2);
+        assertEq(reg.versionCount(h1), 2);
     }
 
     function test_checksumStreams_arePerRegistry() public {
         Registry a = Registry(deploy(creator, "a"));
         Registry b = Registry(deploy(creator, "b"));
-        addRecord(creator, b, "other");
-        (uint256 inA,) = addRecord(creator, a, "shared");
-        (uint256 inB,) = addRecord(creator, b, "shared");
-        assertEq(inA, 1);
-        assertEq(inB, 2, "independent per-registry recordId sequences");
+        addRecord(creator, b, "shared");
+        addRecord(creator, b, "shared");
+        (bytes32 hash,) = addRecord(creator, a, "shared");
+
+        // One identity, two registries: the address separates them, so the version counts
+        // run independently even though the key is the same in both.
+        assertEq(a.versionCount(hash), 1);
+        assertEq(b.versionCount(hash), 2);
     }
 
     function test_addRecord_requiresARole() public {
@@ -159,11 +172,11 @@ contract RegistryTest is Test {
     function test_everyEnvelopeLeadsWithItsKind() public {
         // An indexer classifies a payload from the log alone, without deriving keys first.
         Registry reg = Registry(deploy(creator, "docs"));
-        (uint256 recordId, uint256 index) = addRecord(creator, reg, "abc");
+        (bytes32 checksumHash, uint256 index) = addRecord(creator, reg, "abc");
         vm.prank(creator);
-        reg.updateRecordStatus(recordId, index, "redacted");
+        reg.updateRecordStatus("abc", index, "redacted");
 
-        bytes32[2] memory keys = [reg.recordKey(recordId), reg.statusKey(recordId, index)];
+        bytes32[2] memory keys = [reg.recordKey(checksumHash), reg.statusKey(checksumHash, index)];
         bytes32[2] memory kinds = [reg.KIND_RECORD(), reg.KIND_STATUS()];
 
         for (uint256 i; i < keys.length; i++) {
@@ -317,31 +330,40 @@ contract RegistryTest is Test {
     // -- status --------------------------------------------------------------
     function test_updateRecordStatus_isIdempotentAndAnchored() public {
         Registry reg = Registry(deploy(creator, "docs"));
-        (uint256 recordId, uint256 index) = addRecord(creator, reg, "abc");
+        (bytes32 checksumHash, uint256 index) = addRecord(creator, reg, "abc");
 
         // Re-asserting the same status must not trip the precompile's no-op rule: the
         // envelope's sequence number keeps every digest distinct.
         vm.prank(creator);
-        reg.updateRecordStatus(recordId, index, "redacted");
+        reg.updateRecordStatus("abc", index, "redacted");
         vm.prank(creator);
-        reg.updateRecordStatus(recordId, index, "redacted");
+        reg.updateRecordStatus("abc", index, "redacted");
 
         assertTrue(
-            IAnchoring(ANCHORING_ADDRESS).latest(address(reg), reg.statusKey(recordId, index)) != 0
+            IAnchoring(ANCHORING_ADDRESS).latest(address(reg), reg.statusKey(checksumHash, index))
+                != 0
         );
     }
 
     function test_updateRecordStatus_checksAuthAndExistence() public {
         Registry reg = Registry(deploy(creator, "docs"));
-        (uint256 recordId, uint256 index) = addRecord(creator, reg, "abc");
+        (bytes32 checksumHash, uint256 index) = addRecord(creator, reg, "abc");
 
         vm.prank(stranger);
         vm.expectRevert(Registry.Unauthorized.selector);
-        reg.updateRecordStatus(recordId, index, "x");
+        reg.updateRecordStatus("abc", index, "x");
 
         vm.prank(creator);
-        vm.expectRevert(abi.encodeWithSelector(Registry.RecordNotFound.selector, recordId, 9));
-        reg.updateRecordStatus(recordId, 9, "x");
+        vm.expectRevert(abi.encodeWithSelector(Registry.RecordNotFound.selector, checksumHash, 9));
+        reg.updateRecordStatus("abc", 9, "x");
+
+        // A checksum with no stream at all takes the same path -- its version count is zero,
+        // so every index is out of range.
+        vm.prank(creator);
+        vm.expectRevert(
+            abi.encodeWithSelector(Registry.RecordNotFound.selector, keccak256("nope"), 1)
+        );
+        reg.updateRecordStatus("nope", 1, "x");
     }
 
     // -- upgrade -------------------------------------------------------------
@@ -357,7 +379,7 @@ contract RegistryTest is Test {
         // One upgrade, both registries — that is what the beacon buys over N proxies.
         assertEq(RegistryV2(address(a)).version(), 2);
         assertEq(RegistryV2(address(b)).version(), 2);
-        assertEq(a.recordIdForChecksum("abc"), 1, "state survives the upgrade");
+        assertEq(a.versionCount(keccak256("abc")), 1, "state survives the upgrade");
         assertTrue(a.hasRole("", creator, ADMIN));
     }
 
