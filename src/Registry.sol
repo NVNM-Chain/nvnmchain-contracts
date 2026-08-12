@@ -165,8 +165,12 @@ contract Registry {
         (bytes32 roleId, bytes32 checksumHash, bool registryScope) = _scopedRole(checksum, role);
         bool registryAdmin = registryScope && role == ROLE_ADMIN;
 
-        bool breakGlass = registryAdmin && msg.sender == owner();
-        if (!breakGlass && !_isRegistryAdmin()) revert Unauthorized();
+        // The admin bit first: it is one warm SLOAD, where `owner()` is an external
+        // call into the factory -- break-glass is consulted only when the caller
+        // holds nothing, which is the case it exists for.
+        if (!_isRegistryAdmin() && !(registryAdmin && msg.sender == owner())) {
+            revert Unauthorized();
+        }
 
         if (!member[roleId][account]) {
             member[roleId][account] = true;
