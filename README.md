@@ -29,18 +29,20 @@ or record-scoped (one checksum within it), over `admin` and `editor`. The owner 
 break-glass admin: it may grant a registry `admin` without holding one, which is what keeps the
 "last admin cannot be revoked" rule recoverable.
 
-Registries are beacon proxies over the factory's implementation pointer, so one upgrade moves
-every registry at once. Registry name, description and metadata ride in `RegistryDeployed`
-rather than an anchor: descriptive, set once, nothing to prove.
+Registries are immutable: upgrading means deploying a new one and re-granting its roles.
+What a registry anchors is a commitment, provable under the address that wrote it forever, so
+a replacement splits the history across two addresses rather than invalidating any of it.
+Registry name, description and metadata ride in `RegistryDeployed` rather than an anchor:
+descriptive, set once, nothing to prove.
 
 ## Layout
 
-- `src/Registry.sol` — one registry, behind a beacon proxy
+- `src/Registry.sol` — one registry, deployed outright and immutable
 - `src/RegistryFactory.sol` — deploys registries and holds the implementation pointer
 - `src/interfaces/IAnchoring.sol` — the precompile's interface and address
 - `test/support/MockAnchoring.sol` — a stand-in for the precompile, etched at its address so
   tests run in a plain forge EVM
-- `test/support/RegistryDeployer.sol` — one-shot impl + impl + ERC-1967 proxy deploy, for local
+- `test/support/RegistryDeployer.sol` — one-shot factory deploy, for local
   and e2e use
 
 ## Develop

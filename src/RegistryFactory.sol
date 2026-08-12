@@ -2,17 +2,18 @@
 pragma solidity ^0.8.23;
 
 import { Ownable } from "solady/auth/Ownable.sol";
-import { Initializable } from "solady/utils/Initializable.sol";
-import { UUPSUpgradeable } from "solady/utils/UUPSUpgradeable.sol";
 
 import { Registry } from "./Registry.sol";
 
 /// @title RegistryFactory
 /// @notice Deploys one {Registry} per registry and is the record of which ones exist.
-/// @dev Registries are beacon proxies: `implementation()` here is the single upgrade point
-///      for every registry at once, which is what the one-proxy-for-everything design bought
-///      and this keeps. `owner` (a Safe) is the upgrade authority, and every registry reads it
-///      back as its break-glass admin.
+/// @dev Registries are plain deployments, not proxies, and neither is this. Upgrading means
+///      deploying a new registry and re-granting its roles: what a registry anchors is a
+///      commitment, provable under the address that wrote it forever, so a replacement splits
+///      the history across two addresses rather than invalidating any of it.
+///
+///      `owner` (a Safe) is the break-glass admin every registry reads back through {owner}.
+///      Transferring it reaches every registry at once, because they read it live from here.
 ///
 ///      Registry metadata is *not* anchored. Name, description and metadata are descriptive
 ///      rather than a commitment, and they are set once at deployment, so `RegistryDeployed`
@@ -25,12 +26,7 @@ import { Registry } from "./Registry.sol";
 ///      indexer's job. A contract caller keeps the address `deployRegistry` returns;
 ///      an EOA gets no return value and reads it from `RegistryDeployed`, like any
 ///      other consumer of the log.
-contract RegistryFactory is UUPSUpgradeable, Initializable, Ownable {
-    // -- beacon --------------------------------------------------------------
-    /// @notice The implementation every registry proxy delegates to. Upgrading it upgrades
-    ///         every registry in one transaction.
-    address public implementation;
-
+contract RegistryFactory is Ownable {
     event RegistryDeployed(
         address indexed registry,
         address indexed creator,
@@ -38,19 +34,11 @@ contract RegistryFactory is UUPSUpgradeable, Initializable, Ownable {
         string description,
         string metadata
     );
-    event ImplementationUpgraded(address indexed implementation);
-
     error EmptyName();
-    /// @dev `delegatecall` to an account with no code *succeeds* with empty returndata, so
-    ///      every registry behind such a beacon would return zeros instead of reverting.
-    ///      A code check refuses the whole class -- zero, an EOA, a typo -- not just zero.
-    error CodelessImplementation();
 
-    function initialize(address owner_, address implementation_) external initializer {
-        if (implementation_.code.length == 0) revert CodelessImplementation();
+    /// @param owner_ the break-glass admin every registry reads back through {owner}.
+    constructor(address owner_) {
         _initializeOwner(owner_);
-        implementation = implementation_;
-        emit ImplementationUpgraded(implementation_);
     }
 
     /// @notice Deploys a registry and makes the caller its admin. Permissionless, and `name`
@@ -62,47 +50,7 @@ contract RegistryFactory is UUPSUpgradeable, Initializable, Ownable {
     ) external returns (address registry) {
         if (bytes(name).length == 0) revert EmptyName();
 
-        registry = address(new BeaconProxy(address(this)));
-        Registry(registry).initialize(msg.sender, address(this));
+        registry = address(new Registry(msg.sender, address(this)));
         emit RegistryDeployed(registry, msg.sender, name, description, metadata);
-    }
-
-    /// @notice Points every registry at a new implementation.
-    function upgradeRegistries(address implementation_) external onlyOwner {
-        if (implementation_.code.length == 0) revert CodelessImplementation();
-        implementation = implementation_;
-        emit ImplementationUpgraded(implementation_);
-    }
-
-    function _authorizeUpgrade(address) internal override onlyOwner { }
-
-    /// @dev Prevent the owner slot from being re-initialized on an upgradeable deployment.
-    function _guardInitializeOwner() internal pure override returns (bool) {
-        return true;
-    }
-}
-
-/// @notice Minimal beacon proxy: reads its implementation from the factory on every call, so
-///         one factory upgrade moves every registry.
-/// @dev Deliberately tiny — the deploy cost per registry is this contract's bytecode, and a
-///      registry is expected to be cheap to create.
-contract BeaconProxy {
-    /// @dev The beacon (the factory). Immutable, so it costs no storage read per call.
-    address private immutable BEACON;
-
-    constructor(address beacon) {
-        BEACON = beacon;
-    }
-
-    fallback() external payable {
-        address impl = RegistryFactory(BEACON).implementation();
-        assembly {
-            calldatacopy(0, 0, calldatasize())
-            let ok := delegatecall(gas(), impl, 0, calldatasize(), 0, 0)
-            returndatacopy(0, 0, returndatasize())
-            switch ok
-            case 0 { revert(0, returndatasize()) }
-            default { return(0, returndatasize()) }
-        }
     }
 }

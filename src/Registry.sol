@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import { Initializable } from "solady/utils/Initializable.sol";
-
 import { ANCHORING_ADDRESS, IAnchoring } from "./interfaces/IAnchoring.sol";
 
 /// @dev Just enough of the factory to read its owner, so the two contracts do not import
@@ -30,11 +28,10 @@ interface IOwned {
 ///      anchored: membership is this contract's state, history is `RoleGranted`/`RoleRevoked`,
 ///      and a third copy in the anchored log would only be something to drift.
 ///
-///      Behind a beacon proxy, so the factory upgrades every registry at once. Break-glass
-///      admin is read through the factory rather than copied here, so transferring ownership
-///      moves it for every registry instead of only for the ones deployed afterwards.
-///      Storage is ERC-7201-namespaced.
-contract Registry is Initializable {
+///      Immutable once deployed: no proxy, no `delegatecall`, so storage is plain. Break-glass
+///      admin is read live through the factory rather than copied here, so transferring
+///      ownership moves it for every registry instead of only for the ones deployed after.
+contract Registry {
     // -- roles ---------------------------------------------------------------
     bytes32 public constant ROLE_ADMIN = "admin";
     bytes32 public constant ROLE_EDITOR = "editor";
@@ -47,31 +44,21 @@ contract Registry is Initializable {
     ///         which is what an empty checksum hashes to.
     bytes32 public constant REGISTRY_SCOPE = keccak256("");
 
-    // -- ERC-7201 namespaced storage -----------------------------------------
-    /// @custom:storage-location erc7201:anchoring.registry.instance.storage
-    struct RegistryStorage {
-        // the factory, read for `owner()` — its owner is the break-glass admin
-        address factory;
-        // keccak(checksum) => version count; 0 means no such record
-        mapping(bytes32 => uint256) versionCount;
-        // roleId => account => member
-        mapping(bytes32 => mapping(address => bool)) member;
-        // registry-level admin count, so last-admin protection is O(1)
-        uint256 adminCount;
-        // discriminator for status envelopes, so idempotent re-assertions never
-        // collide with the precompile's no-op rule
-        uint256 seq;
-    }
+    // -- storage --------------------------------------------------------------
+    /// @notice The factory that deployed this registry. Its owner is the
+    ///         break-glass admin, read live so a transfer reaches every registry.
+    address public immutable factory;
 
-    // keccak256(abi.encode(uint256(keccak256("anchoring.registry.instance.storage")) - 1)) & ~bytes32(uint256(0xff))
-    bytes32 private constant SLOT =
-        0xb5d5cee421de9184cedcdbf1c135f75de55ad252b6bdc4430a441446fc45c900;
+    /// @notice `keccak(checksum)` => version count; 0 means no such record.
+    mapping(bytes32 => uint256) public versionCount;
 
-    function _s() private pure returns (RegistryStorage storage $) {
-        assembly {
-            $.slot := SLOT
-        }
-    }
+    /// roleId => account => member
+    mapping(bytes32 => mapping(address => bool)) private member;
+    /// Registry-level admin count, so last-admin protection is O(1).
+    uint256 private adminCount;
+    /// Discriminator for status envelopes, so idempotent re-assertions never
+    /// collide with the precompile's no-op rule.
+    uint256 private seq;
 
     // -- events --------------------------------------------------------------
     event RecordAdded(bytes32 indexed checksumHash, uint256 index, string checksum);
@@ -89,13 +76,11 @@ contract Registry is Initializable {
     error LastAdmin();
     error Unauthorized();
 
-    /// @notice Initializes the registry with its first admin. Called by the factory in the
-    ///         same transaction as the deployment.
-    function initialize(address admin, address factory_) external initializer {
-        RegistryStorage storage $ = _s();
-        $.factory = factory_;
-        $.member[ROLE_ADMIN][admin] = true;
-        $.adminCount = 1;
+    /// @notice Deployed by {RegistryFactory}, with its creator as the first admin.
+    constructor(address admin, address factory_) {
+        factory = factory_;
+        member[ROLE_ADMIN][admin] = true;
+        adminCount = 1;
         emit RoleGranted(REGISTRY_SCOPE, admin, ROLE_ADMIN);
     }
 
@@ -130,10 +115,9 @@ contract Registry is Initializable {
         if (bytes(checksum).length == 0) revert EmptyChecksum();
         if (bytes(uri).length == 0) revert EmptyUri();
 
-        RegistryStorage storage $ = _s();
         checksumHash = keccak256(bytes(checksum));
         _checkWriter(checksumHash);
-        index = ++$.versionCount[checksumHash];
+        index = ++versionCount[checksumHash];
 
         IAnchoring(ANCHORING_ADDRESS)
             .anchorAndHash(
@@ -158,9 +142,8 @@ contract Registry is Initializable {
     function updateRecordStatus(string calldata checksum, uint256 index, string calldata status)
         external
     {
-        RegistryStorage storage $ = _s();
         bytes32 checksumHash = keccak256(bytes(checksum));
-        if (index == 0 || index > $.versionCount[checksumHash]) {
+        if (index == 0 || index > versionCount[checksumHash]) {
             revert RecordNotFound(checksumHash, index);
         }
         _checkWriter(checksumHash);
@@ -168,7 +151,7 @@ contract Registry is Initializable {
         IAnchoring(ANCHORING_ADDRESS)
             .anchorAndHash(
                 statusKey(checksumHash, index),
-                abi.encode(KIND_STATUS, checksumHash, index, status, ++$.seq)
+                abi.encode(KIND_STATUS, checksumHash, index, status, ++seq)
             );
         emit RecordStatusUpdated(checksumHash, index, status);
     }
@@ -182,13 +165,12 @@ contract Registry is Initializable {
         (bytes32 roleId, bytes32 checksumHash, bool registryScope) = _scopedRole(checksum, role);
         bool registryAdmin = registryScope && role == ROLE_ADMIN;
 
-        RegistryStorage storage $ = _s();
         bool breakGlass = registryAdmin && msg.sender == owner();
         if (!breakGlass && !_isRegistryAdmin()) revert Unauthorized();
 
-        if (!$.member[roleId][account]) {
-            $.member[roleId][account] = true;
-            if (registryAdmin) $.adminCount++;
+        if (!member[roleId][account]) {
+            member[roleId][account] = true;
+            if (registryAdmin) adminCount++;
         }
         emit RoleGranted(checksumHash, account, role);
     }
@@ -199,15 +181,14 @@ contract Registry is Initializable {
     function revokeRole(string calldata checksum, address account, bytes32 role) external {
         (bytes32 roleId, bytes32 checksumHash, bool registryScope) = _scopedRole(checksum, role);
 
-        RegistryStorage storage $ = _s();
         if (!_isRegistryAdmin()) revert Unauthorized();
-        if (!$.member[roleId][account]) revert MissingRole(account, role);
+        if (!member[roleId][account]) revert MissingRole(account, role);
 
         if (registryScope && role == ROLE_ADMIN) {
-            if ($.adminCount <= 1) revert LastAdmin();
-            $.adminCount--;
+            if (adminCount <= 1) revert LastAdmin();
+            adminCount--;
         }
-        $.member[roleId][account] = false;
+        member[roleId][account] = false;
         emit RoleRevoked(checksumHash, account, role);
     }
 
@@ -215,15 +196,7 @@ contract Registry is Initializable {
     /// @notice The break-glass admin: the factory's owner, read live rather than copied at
     ///         deployment, so transferring it moves every registry at once.
     function owner() public view returns (address) {
-        return IOwned(_s().factory).owner();
-    }
-
-    function factory() external view returns (address) {
-        return _s().factory;
-    }
-
-    function versionCount(bytes32 checksumHash) external view returns (uint256) {
-        return _s().versionCount[checksumHash];
+        return IOwned(factory).owner();
     }
 
     function hasRole(string calldata checksum, address account, bytes32 role)
@@ -232,7 +205,7 @@ contract Registry is Initializable {
         returns (bool)
     {
         (bytes32 roleId,,) = _resolveRole(checksum, role);
-        return roleId != 0 && _s().member[roleId][account];
+        return roleId != 0 && member[roleId][account];
     }
 
     /// @notice The latest anchored digest for a record stream — verifiable against the
@@ -244,17 +217,16 @@ contract Registry is Initializable {
     // -- internals -----------------------------------------------------------
     /// @dev The caller holds this registry's `admin` role.
     function _isRegistryAdmin() private view returns (bool) {
-        return _s().member[ROLE_ADMIN][msg.sender];
+        return member[ROLE_ADMIN][msg.sender];
     }
 
     /// @dev `admin` or `editor`, registry scope first (the common case — every first version
     ///      is necessarily written by a registry-scoped holder), then record scope.
     function _checkWriter(bytes32 checksumHash) private view {
-        RegistryStorage storage $ = _s();
         if (_isRegistryAdmin()) return;
-        if ($.member[ROLE_EDITOR][msg.sender]) return;
-        if ($.member[recordRole(checksumHash, ROLE_ADMIN)][msg.sender]) return;
-        if ($.member[recordRole(checksumHash, ROLE_EDITOR)][msg.sender]) return;
+        if (member[ROLE_EDITOR][msg.sender]) return;
+        if (member[recordRole(checksumHash, ROLE_ADMIN)][msg.sender]) return;
+        if (member[recordRole(checksumHash, ROLE_EDITOR)][msg.sender]) return;
         revert Unauthorized();
     }
 
@@ -269,7 +241,7 @@ contract Registry is Initializable {
         checksumHash = keccak256(bytes(checksum));
         if (registryScope) {
             roleId = role;
-        } else if (_s().versionCount[checksumHash] != 0) {
+        } else if (versionCount[checksumHash] != 0) {
             roleId = recordRole(checksumHash, role);
         }
     }

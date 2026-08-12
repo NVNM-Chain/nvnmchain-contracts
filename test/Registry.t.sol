@@ -11,14 +11,6 @@ import { ANCHORING_ADDRESS, IAnchoring } from "../src/interfaces/IAnchoring.sol"
 import { MockAnchoring } from "./support/MockAnchoring.sol";
 import { RegistryDeployer } from "./support/RegistryDeployer.sol";
 
-/// @dev A trivial V2 to prove a beacon upgrade preserves storage and swaps logic for every
-///      registry at once.
-contract RegistryV2 is Registry {
-    function version() external pure returns (uint256) {
-        return 2;
-    }
-}
-
 contract RegistryTest is Test {
     RegistryFactory factory;
 
@@ -310,7 +302,7 @@ contract RegistryTest is Test {
 
     function test_theCreatorsAdminIsAnnouncedAsAGrant() public {
         // An indexer folding RoleGranted/RoleRevoked must see the creator's admin without a
-        // special case for deployment, so initialize emits it like any other grant.
+        // special case for deployment, so the constructor emits it like any other grant.
         vm.recordLogs();
         Registry reg = Registry(deploy(creator, "docs"));
         Vm.Log[] memory logs = vm.getRecordedLogs();
@@ -366,23 +358,6 @@ contract RegistryTest is Test {
         reg.updateRecordStatus("nope", 1, "x");
     }
 
-    // -- upgrade -------------------------------------------------------------
-    function test_beaconUpgrade_movesEveryRegistryAtOnce() public {
-        Registry a = Registry(deploy(creator, "a"));
-        Registry b = Registry(deploy(creator, "b"));
-        addRecord(creator, a, "abc");
-
-        address v2 = address(new RegistryV2());
-        vm.prank(owner);
-        factory.upgradeRegistries(v2);
-
-        // One upgrade, both registries — that is what the beacon buys over N proxies.
-        assertEq(RegistryV2(address(a)).version(), 2);
-        assertEq(RegistryV2(address(b)).version(), 2);
-        assertEq(a.versionCount(keccak256("abc")), 1, "state survives the upgrade");
-        assertTrue(a.hasRole("", creator, ADMIN));
-    }
-
     function test_breakGlassFollowsTheFactoryOwner() public {
         // Read through the factory rather than copied at deployment, so transferring
         // ownership moves break-glass for registries that already exist -- not only for the
@@ -402,40 +377,5 @@ contract RegistryTest is Test {
         vm.prank(owner);
         vm.expectRevert(Registry.Unauthorized.selector);
         reg.grantRole("", editor, ADMIN);
-    }
-
-    function test_aRegistryCannotBeReinitialized() public {
-        // initialize grants its first admin, so a second call is a seizure: the caller would
-        // write itself in as a registry admin of someone else's registry.
-        Registry reg = Registry(deploy(creator, "docs"));
-        vm.prank(stranger);
-        vm.expectRevert();
-        reg.initialize(stranger, stranger);
-        assertFalse(reg.hasRole("", stranger, ADMIN));
-    }
-
-    function test_aCodelessImplementationIsRefused() public {
-        // delegatecall to an account with no code *succeeds* with empty returndata, so a
-        // registry behind such a beacon would answer every call with zeros rather than
-        // reverting. Both entry points refuse the whole class -- zero and any codeless
-        // address (an EOA, a typo) alike.
-        for (uint256 i; i < 2; i++) {
-            address codeless = i == 0 ? address(0) : makeAddr("eoa");
-            vm.prank(owner);
-            vm.expectRevert(RegistryFactory.CodelessImplementation.selector);
-            factory.upgradeRegistries(codeless);
-
-            RegistryFactory fresh =
-                RegistryFactory(LibClone.deployERC1967(address(new RegistryFactory())));
-            vm.expectRevert(RegistryFactory.CodelessImplementation.selector);
-            fresh.initialize(owner, codeless);
-        }
-    }
-
-    function test_onlyOwnerUpgrades() public {
-        address v2 = address(new RegistryV2());
-        vm.prank(stranger);
-        vm.expectRevert(Ownable.Unauthorized.selector);
-        factory.upgradeRegistries(v2);
     }
 }
