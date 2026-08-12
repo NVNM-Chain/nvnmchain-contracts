@@ -28,6 +28,10 @@ interface IOwned {
 ///      anchored: membership is this contract's state, history is `RoleGranted`/`RoleRevoked`,
 ///      and a third copy in the anchored log would only be something to drift.
 ///
+///      There is no record-count getter. `recordCount` mints ids and nothing else reads it:
+///      "how many records" and "list them in order" are `RecordAdded` replayed by an indexer,
+///      the same split the factory makes for the set of registries.
+///
 ///      Behind a beacon proxy, so the factory upgrades every registry at once. Break-glass
 ///      admin is read through the factory rather than copied here, so transferring ownership
 ///      moves it for every registry instead of only for the ones deployed afterwards.
@@ -227,10 +231,6 @@ contract Registry is Initializable {
 
     function factory() external view returns (address) {
         return _s().factory;
-    }
-
-    function recordCount() external view returns (uint256) {
-        return _s().recordCount;
     }
 
     function recordIdForChecksum(string calldata checksum) external view returns (uint256) {
