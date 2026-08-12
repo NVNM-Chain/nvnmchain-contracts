@@ -18,20 +18,22 @@ import { Registry } from "./Registry.sol";
 ///      rather than a commitment, and they are set once at deployment, so `RegistryDeployed`
 ///      is the whole record — an indexer reads it straight from the log with no envelope to
 ///      decode. What gets anchored is what needs proving: the records themselves.
+///
+///      Nor is the set of registries kept on-chain. An array would be a second copy of what
+///      the log already carries, and deployment order is canonical log order — the same
+///      argument the precompile makes for not storing a version field. Enumeration is the
+///      indexer's job. A contract caller keeps the address `deployRegistry` returns;
+///      an EOA gets no return value and reads it from `RegistryDeployed`, like any
+///      other consumer of the log.
 contract RegistryFactory is UUPSUpgradeable, Initializable, Ownable {
     // -- beacon --------------------------------------------------------------
     /// @notice The implementation every registry proxy delegates to. Upgrading it upgrades
     ///         every registry in one transaction.
     address public implementation;
 
-    /// @notice Registries in deployment order, so the set is enumerable on-chain as well as
-    ///         from the log.
-    address[] public registries;
-
     event RegistryDeployed(
         address indexed registry,
         address indexed creator,
-        uint256 indexed index,
         string name,
         string description,
         string metadata
@@ -62,10 +64,7 @@ contract RegistryFactory is UUPSUpgradeable, Initializable, Ownable {
 
         registry = address(new BeaconProxy(address(this)));
         Registry(registry).initialize(msg.sender, address(this));
-
-        uint256 index = registries.length;
-        registries.push(registry);
-        emit RegistryDeployed(registry, msg.sender, index, name, description, metadata);
+        emit RegistryDeployed(registry, msg.sender, name, description, metadata);
     }
 
     /// @notice Points every registry at a new implementation.
@@ -73,10 +72,6 @@ contract RegistryFactory is UUPSUpgradeable, Initializable, Ownable {
         if (implementation_.code.length == 0) revert CodelessImplementation();
         implementation = implementation_;
         emit ImplementationUpgraded(implementation_);
-    }
-
-    function registryCount() external view returns (uint256) {
-        return registries.length;
     }
 
     function _authorizeUpgrade(address) internal override onlyOwner { }

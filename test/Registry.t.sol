@@ -69,11 +69,22 @@ contract RegistryTest is Test {
         assertFalse(Registry(b).hasRole("", creator, ADMIN));
     }
 
-    function test_deployRegistry_recordsTheSet() public {
-        uint256 before = factory.registryCount();
+    function test_deployRegistry_announcesTheAddressItReturns() public {
+        // The log is the whole record of which registries exist -- there is no on-chain
+        // set -- so the announcement has to name the address the call handed back.
+        vm.recordLogs();
         address reg = deploy(creator, "docs");
-        assertEq(factory.registryCount(), before + 1);
-        assertEq(factory.registries(before), reg, "enumerable on-chain, not only from the log");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        bytes32 wanted = keccak256("RegistryDeployed(address,address,string,string,string)");
+        for (uint256 i; i < logs.length; i++) {
+            if (logs[i].emitter == address(factory) && logs[i].topics[0] == wanted) {
+                assertEq(address(uint160(uint256(logs[i].topics[1]))), reg, "the registry");
+                assertEq(address(uint160(uint256(logs[i].topics[2]))), creator, "its creator");
+                return;
+            }
+        }
+        revert("no RegistryDeployed for the returned address");
     }
 
     function test_deployRegistry_rejectsAnEmptyName() public {
