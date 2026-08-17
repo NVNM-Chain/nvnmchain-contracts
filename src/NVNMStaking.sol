@@ -452,23 +452,19 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         emit CandidacyBondSet(bond);
     }
 
-    /// @notice Top-`maxSeats` candidates by `bond * acquiredWeight + delegated`, one seat each.
-    ///         Candidates below the `minAcquired` floor, or with zero weight, are dropped;
-    ///         ties keep candidate-list order. Unconfigured (`maxSeats` 0), or seating fewer
-    ///         than `minSeats` members, elects nobody.
+    /// @notice Top-`maxSeats` candidates by `bond * acquiredWeight + delegated`, one equal
+    ///         seat each — the threshold-simplex engine is unit-weighted, so the committee is
+    ///         just this address list. Candidates below the `minAcquired` floor, or with zero
+    ///         weight, are dropped; ties keep candidate-list order. Unconfigured (`maxSeats`
+    ///         0), or seating fewer than `minSeats` members, elects nobody.
     /// @dev The consensus layer reads this at a chosen block, and that read is itself the
-    ///      stake snapshot. Seats are always 1: the threshold-simplex engine is unit-weighted.
-    ///      Unconfigured must return empty rather than revert: the node treats a revert as a
-    ///      node-local read failure and stalls its epoch feed, while an empty committee routes
-    ///      every node into the designed registry fallback together.
-    function computeCommittee()
-        external
-        view
-        returns (address[] memory vals, uint256[] memory seats)
-    {
+    ///      stake snapshot. Unconfigured must return empty rather than revert: the node
+    ///      treats a revert as a node-local read failure and stalls its epoch feed, while an
+    ///      empty committee routes every node into the designed registry fallback together.
+    function computeCommittee() external view returns (address[] memory vals) {
         StakingStorage storage $ = _s();
         uint256 maxSeats = $.maxSeats;
-        if (maxSeats == 0) return (vals, seats);
+        if (maxSeats == 0) return vals;
 
         uint256 weightMul = $.acquiredWeight;
         if (weightMul == 0) weightMul = 1;
@@ -513,12 +509,10 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         // Below the viability floor the election seats nobody: better every node falls back
         // to the full registry together than consensus runs on a committee smaller than
         // governance considers safe.
-        if (count < $.minSeats) return (vals, seats);
+        if (count < $.minSeats) return vals;
         vals = new address[](count);
-        seats = new uint256[](count);
         for (uint256 i; i < count; ++i) {
             vals[i] = cv[i];
-            seats[i] = 1;
         }
     }
 
