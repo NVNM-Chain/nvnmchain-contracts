@@ -598,6 +598,31 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         assertEq(vals[0], validator);
     }
 
+    function test_election_minSeatsElectsNobodyBelowTheFloor() public {
+        // Without the floor, a thinning candidate set walks fault tolerance down seat by
+        // seat; below it the election seats nobody and every node falls back together.
+        _electionSetup();
+        _stake(alice, validator, 100 ether);
+        _stake(bob, validator2, 100 ether);
+
+        vm.prank(owner);
+        staking.setMinSeats(3);
+        (address[] memory vals,) = staking.computeCommittee();
+        assertEq(vals.length, 0, "two seats below a floor of three elects nobody");
+
+        vm.prank(owner);
+        staking.setMinSeats(2);
+        (vals,) = staking.computeCommittee();
+        assertEq(vals.length, 2, "at the floor the committee seats");
+        assertEq(staking.minSeats(), 2);
+    }
+
+    function test_election_minSeatsOnlyOwnerSets() public {
+        vm.prank(alice);
+        vm.expectRevert(Ownable.Unauthorized.selector);
+        staking.setMinSeats(3);
+    }
+
     function test_election_absurdAcquiredWeightSaturatesInsteadOfReverting() public {
         // The weight formula must be total: a checked-overflow revert here is deterministic,
         // and the node maps it to a stalled epoch feed rather than the registry fallback.

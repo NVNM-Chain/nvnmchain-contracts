@@ -58,7 +58,10 @@ deposited, never minted.
 - **NVNMStaking** — per-validator share pools and **bond-only slash**:
   delegators are never slashed. `computeCommittee` is top-N (21 at Phase 5) by
   `acquired * acquiredWeight + delegated`, one equal seat each, capped per
-  validator by `maxDelegated`. `candidacyBond` is the 1M NVNM acquired stake and
+  validator by `maxDelegated`. Seating fewer than `minSeats` members elects
+  nobody, dropping every node to the registry fallback together rather than
+  running consensus on a committee below the intended fault tolerance.
+  `candidacyBond` is the 1M NVNM acquired stake and
   `minAcquired` the floor that enforces it at election time — below it,
   delegation alone never buys a seat. Stake and bonds both leave through the
   unbonding delay, and a departing bond stays slashable until `withdrawBond` —

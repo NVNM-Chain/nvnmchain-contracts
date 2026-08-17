@@ -71,6 +71,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         uint256 acquiredWeight;
         uint256 maxDelegated;
         uint256 minAcquired;
+        // minSeats: the committee viability floor. Electing fewer members elects nobody, and
+        // an empty committee drops every node to the registry fallback together. 0 disables.
+        uint256 minSeats;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nvnm.staking.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -93,6 +96,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     event CommitteeConfigSet(uint256 maxCommittee, uint256 acquiredWeight, uint256 maxDelegated);
     event CandidacyBondSet(uint256 bond);
     event MinAcquiredSet(uint256 minAcquired);
+    event MinSeatsSet(uint256 minSeats);
     event UnbondingPeriodSet(uint256 period);
     event UnstakeRequested(
         address indexed validator, address indexed user, uint256 amount, uint256 releaseAt
@@ -434,6 +438,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         emit MinAcquiredSet(minAcquired_);
     }
 
+    /// @notice Set the committee viability floor: electing fewer than `minSeats` members
+    ///         elects nobody, dropping every node to the registry fallback together instead
+    ///         of seating a committee below the intended fault tolerance. 0 disables it.
+    function setMinSeats(uint256 minSeats_) external onlyOwner {
+        _s().minSeats = minSeats_;
+        emit MinSeatsSet(minSeats_);
+    }
+
     /// @notice Set the NVNM bond for permissionless candidacy (0 closes self-registration).
     function setCandidacyBond(uint256 bond) external onlyOwner {
         _s().candidacyBond = bond;
@@ -442,7 +454,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     /// @notice Top-`maxSeats` candidates by `bond * acquiredWeight + delegated`, one seat each.
     ///         Candidates below the `minAcquired` floor, or with zero weight, are dropped;
-    ///         ties keep candidate-list order. Unconfigured (`maxSeats` 0) elects nobody.
+    ///         ties keep candidate-list order. Unconfigured (`maxSeats` 0), or seating fewer
+    ///         than `minSeats` members, elects nobody.
     /// @dev The consensus layer reads this at a chosen block, and that read is itself the
     ///      stake snapshot. Seats are always 1: the threshold-simplex engine is unit-weighted.
     ///      Unconfigured must return empty rather than revert: the node treats a revert as a
@@ -497,6 +510,10 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         }
 
         uint256 count = m < maxSeats ? m : maxSeats;
+        // Below the viability floor the election seats nobody: better every node falls back
+        // to the full registry together than consensus runs on a committee smaller than
+        // governance considers safe.
+        if (count < $.minSeats) return (vals, seats);
         vals = new address[](count);
         seats = new uint256[](count);
         for (uint256 i; i < count; ++i) {
@@ -569,6 +586,10 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     function minAcquired() external view returns (uint256) {
         return _s().minAcquired;
+    }
+
+    function minSeats() external view returns (uint256) {
+        return _s().minSeats;
     }
 
     function committeeConfig()
