@@ -179,6 +179,35 @@ contract RegistryTest is Test {
         assertEq(reg.versionCount(keccak256("abc")), 0, "neither started a stream");
     }
 
+    /// The keys and tags every off-chain reader derives for itself, against the vectors the
+    /// decoder in `nvnmchain-anchoring` holds. Nothing else here notices them moving: the
+    /// namespace test compares two registries' derivations to each other, and the kind test
+    /// reads the tag out of an envelope this contract just wrote -- both follow a rename.
+    function test_theWireFormatIsWhatOffChainReadersDerive() public {
+        Registry reg = Registry(deploy(creator, "docs"));
+        // `keccak256("0xabc")`, the checksum those vectors were generated for.
+        bytes32 hash = 0x851bb152e67e6c958ab7da1431fcaed09ce0efc598885f69a750b3b4b81fc1dc;
+        assertEq(hash, keccak256("0xabc"));
+
+        assertEq(reg.KIND_RECORD(), bytes32("record"));
+        assertEq(reg.KIND_STATUS(), bytes32("status"));
+        assertEq(
+            reg.REGISTRY_SCOPE(), 0xc5d2460186f7233c927e7db2dcc703c0e500b653ca82273b7bfad8045d85a470
+        );
+
+        assertEq(
+            reg.recordKey(hash), 0x5de9cfc79de28bdb120140799229816d1be7b571e7dc8db35d3f24d2a35142a3
+        );
+        assertEq(
+            reg.statusKey(hash, 1),
+            0x40c526ce172b7720c74b54727866222688294b31844db86d18ec1075c5702c61
+        );
+        assertEq(
+            reg.recordRole(hash, EDITOR),
+            0xb09af46f64b6fcc046e2a1984e62b5693ebaa204c9d2a2a5227985b5bb238a4e
+        );
+    }
+
     function test_everyEnvelopeLeadsWithItsKind() public {
         // An indexer classifies a payload from the log alone, without deriving keys first.
         Registry reg = Registry(deploy(creator, "docs"));
