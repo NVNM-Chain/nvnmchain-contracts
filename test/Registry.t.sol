@@ -161,6 +161,24 @@ contract RegistryTest is Test {
         addRecord(stranger, reg, "abc");
     }
 
+    function test_addRecord_requiresAChecksumAndAUri() public {
+        // The checksum *is* the record's identity and an empty uri anchors a version pointing
+        // at nothing, so neither is something the contract could supply for the caller.
+        Registry reg = Registry(deploy(creator, "docs"));
+
+        // Refused ahead of the role check, so an empty checksum is not a way to ask whether a
+        // stream exists either.
+        vm.prank(stranger);
+        vm.expectRevert(Registry.EmptyChecksum.selector);
+        reg.addRecord("ipfs://a", "", "sha256", "{}");
+
+        vm.prank(creator);
+        vm.expectRevert(Registry.EmptyUri.selector);
+        reg.addRecord("", "abc", "sha256", "{}");
+
+        assertEq(reg.versionCount(keccak256("abc")), 0, "neither started a stream");
+    }
+
     function test_everyEnvelopeLeadsWithItsKind() public {
         // An indexer classifies a payload from the log alone, without deriving keys first.
         Registry reg = Registry(deploy(creator, "docs"));
@@ -224,6 +242,49 @@ contract RegistryTest is Test {
             abi.encodeWithSelector(Registry.NoRecordForChecksum.selector, keccak256("nope"))
         );
         reg.grantRole("nope", editor, EDITOR);
+    }
+
+    function test_revokingARoleNeverHeldReverts() public {
+        // A revoke names a specific grant, so a wrong one has to fail rather than no-op --
+        // succeeding would read as "that account no longer holds it" when it never did.
+        Registry reg = Registry(deploy(creator, "docs"));
+
+        vm.prank(creator);
+        vm.expectRevert(abi.encodeWithSelector(Registry.MissingRole.selector, stranger, EDITOR));
+        reg.revokeRole("", stranger, EDITOR);
+    }
+
+    function test_hasRole_answersForARecordScope() public {
+        // Every other assertion here reads the registry scope. This is the branch resolving a
+        // checksum to its stream, which answers false for one with no stream rather than
+        // reverting -- the read an integration reaches for first.
+        Registry reg = Registry(deploy(creator, "docs"));
+        addRecord(creator, reg, "abc");
+        vm.prank(creator);
+        reg.grantRole("abc", editor, EDITOR);
+
+        assertTrue(reg.hasRole("abc", editor, EDITOR));
+        assertFalse(reg.hasRole("abc", editor, ADMIN), "the role is part of the scope");
+        assertFalse(reg.hasRole("", editor, EDITOR), "a record grant is not a registry one");
+        assertFalse(reg.hasRole("nope", editor, EDITOR), "a checksum with no stream at all");
+    }
+
+    function test_scopesAreAUnion_ratherThanAnOverride() public {
+        // `_checkWriter` is an OR, so a record-scoped grant adds a writer to one stream and
+        // takes nothing away from a registry-scoped one. There is no way to deny.
+        Registry reg = Registry(deploy(creator, "docs"));
+        addRecord(creator, reg, "abc");
+        vm.prank(creator);
+        reg.grantRole("", editor, EDITOR);
+        vm.prank(creator);
+        reg.grantRole("abc", stranger, EDITOR);
+
+        (, uint256 narrowed) = addRecord(stranger, reg, "abc");
+        assertEq(narrowed, 2);
+        (, uint256 wide) = addRecord(editor, reg, "abc");
+        assertEq(wide, 3, "the registry-scoped writer still reaches the narrowed stream");
+        (, uint256 elsewhere) = addRecord(editor, reg, "def");
+        assertEq(elsewhere, 1, "and every other one");
     }
 
     function test_lastRegistryAdmin_cannotBeRevoked() public {
