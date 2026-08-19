@@ -35,10 +35,22 @@ contract RegistryFactory is Ownable {
         string metadata
     );
     error EmptyName();
+    error OwnershipCannotBeRenounced();
 
     /// @param owner_ the break-glass admin every registry reads back through {owner}.
     constructor(address owner_) {
         _initializeOwner(owner_);
+    }
+
+    /// @notice Disabled. Ownership may be transferred, never dropped.
+    /// @dev {Registry}'s last-admin rule is only safe because break-glass exists: an admin
+    ///      whose key is lost is reachable through this owner and nowhere else. Renouncing
+    ///      would strand every registry this factory has deployed and every one it ever will,
+    ///      from a single call. {Ownable} already refuses the zero address, so the two
+    ///      together are the invariant -- the factory always has an owner, and so every
+    ///      registry always has a rescuer.
+    function renounceOwnership() public payable override {
+        revert OwnershipCannotBeRenounced();
     }
 
     /// @notice Deploys a registry and makes the caller its admin. Permissionless, and `name`

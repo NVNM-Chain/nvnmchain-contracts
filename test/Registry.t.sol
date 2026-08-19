@@ -448,6 +448,24 @@ contract RegistryTest is Test {
         reg.updateRecordStatus("nope", 1, "x");
     }
 
+    function test_ownershipCannotBeRenounced() public {
+        // `revokeRole` will not remove a registry's last admin, so an admin whose key is lost
+        // is recoverable through the factory's owner and nowhere else.
+        Registry reg = Registry(deploy(creator, "docs"));
+
+        vm.prank(owner);
+        vm.expectRevert(RegistryFactory.OwnershipCannotBeRenounced.selector);
+        factory.renounceOwnership();
+
+        // `Ownable` already refuses the zero address, so the two together are the invariant:
+        // the factory always has an owner, and every registry always has a rescuer.
+        vm.prank(owner);
+        vm.expectRevert(Ownable.NewOwnerIsZeroAddress.selector);
+        factory.transferOwnership(address(0));
+
+        assertEq(reg.owner(), owner, "and the registry still reads one back");
+    }
+
     function test_breakGlassFollowsTheFactoryOwner() public {
         // Read through the factory rather than copied at deployment, so transferring
         // ownership moves break-glass for registries that already exist -- not only for the
