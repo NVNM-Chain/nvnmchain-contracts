@@ -73,14 +73,16 @@ contract Registry {
     uint256 private seq;
 
     // -- events --------------------------------------------------------------
-    /// @dev Carries what a consumer dedups on — `checksum`, `dataPointer` — so that needs no
-    ///      envelope decoding.
+    /// @dev Carries what a consumer dedups on — `checksum`, `dataPointer` — and who to
+    ///      attribute it to, so that needs no envelope decoding. `Anchored.caller` cannot
+    ///      stand in for `author`: it is always this contract.
     event RecordAdded(
         bytes32 indexed checksumHash,
         uint256 index,
         string checksum,
         RecordCategory category,
-        string dataPointer
+        string dataPointer,
+        address indexed author
     );
     event RecordStatusUpdated(bytes32 indexed checksumHash, uint256 index, string status);
     event RoleGranted(bytes32 indexed checksumHash, address indexed account, bytes32 role);
@@ -158,10 +160,11 @@ contract Registry {
                     metadata,
                     category,
                     dataPointer,
+                    msg.sender,
                     block.timestamp
                 )
             );
-        emit RecordAdded(checksumHash, index, checksum, category, dataPointer);
+        emit RecordAdded(checksumHash, index, checksum, category, dataPointer, msg.sender);
     }
 
     /// @notice Anchors a status for one record version. Requires `admin` or `editor` at record
@@ -179,7 +182,7 @@ contract Registry {
         IAnchoring(ANCHORING_ADDRESS)
             .anchorAndHash(
                 statusKey(checksumHash, index),
-                abi.encode(KIND_STATUS, checksumHash, index, status, ++seq)
+                abi.encode(KIND_STATUS, checksumHash, index, status, msg.sender, ++seq)
             );
         emit RecordStatusUpdated(checksumHash, index, status);
     }

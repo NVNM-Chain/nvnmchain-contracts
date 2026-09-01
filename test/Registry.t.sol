@@ -143,18 +143,24 @@ contract RegistryTest is Test {
             "{}",
             Registry.RecordCategory.AgenticAI,
             "did:x#1",
+            creator,
             block.timestamp
         );
         assertEq(reg.latestRecordDigest(checksumHash), keccak256(envelope));
     }
 
-    /// A consumer deduping on `dataPointer` reads it from the log, not the envelope.
-    function test_addRecord_emitsCategoryAndPointer() public {
+    /// A consumer deduping on `(author, dataPointer)` reads both from the log, not the envelope.
+    function test_addRecord_emitsCategoryPointerAndAuthor() public {
         Registry reg = Registry(deploy(creator, "docs"));
 
         vm.expectEmit(true, true, true, true);
         emit Registry.RecordAdded(
-            keccak256("abc"), 1, "abc", Registry.RecordCategory.MultiPartyClinicalTrials, "trial-7"
+            keccak256("abc"),
+            1,
+            "abc",
+            Registry.RecordCategory.MultiPartyClinicalTrials,
+            "trial-7",
+            creator
         );
         addRecord(creator, reg, "abc", Registry.RecordCategory.MultiPartyClinicalTrials, "trial-7");
     }
@@ -474,9 +480,13 @@ contract RegistryTest is Test {
         vm.prank(creator);
         reg.updateRecordStatus("abc", index, "redacted");
 
-        assertTrue(
-            IAnchoring(ANCHORING_ADDRESS).latest(address(reg), reg.statusKey(checksumHash, index))
-                != 0
+        // Two status anchors so far, so this one carries sequence 2 — and the asserting
+        // writer, without whom a status is an unattributable claim about someone's record.
+        assertEq(
+            IAnchoring(ANCHORING_ADDRESS).latest(address(reg), reg.statusKey(checksumHash, index)),
+            keccak256(
+                abi.encode(reg.KIND_STATUS(), checksumHash, index, "redacted", creator, uint256(2))
+            )
         );
     }
 
