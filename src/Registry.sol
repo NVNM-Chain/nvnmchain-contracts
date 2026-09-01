@@ -36,6 +36,18 @@ contract Registry {
     bytes32 public constant ROLE_ADMIN = "admin";
     bytes32 public constant ROLE_EDITOR = "editor";
 
+    // -- record categories ---------------------------------------------------
+    /// @notice The use-case a record attests to. An enum so the set is closed and checked at
+    ///         ABI decode — an out-of-range value reverts before any state is touched — and
+    ///         `Unspecified` is the zero value, so a record claiming no category says so.
+    enum RecordCategory {
+        Unspecified,
+        PrivateMarketsDiligence,
+        RegulatedBankUnderwriting,
+        MultiPartyClinicalTrials,
+        AgenticAI
+    }
+
     // -- envelope kinds ------------------------------------------------------
     bytes32 public constant KIND_RECORD = "record";
     bytes32 public constant KIND_STATUS = "status";
@@ -61,7 +73,15 @@ contract Registry {
     uint256 private seq;
 
     // -- events --------------------------------------------------------------
-    event RecordAdded(bytes32 indexed checksumHash, uint256 index, string checksum);
+    /// @dev Carries what a consumer dedups on — `checksum`, `dataPointer` — so that needs no
+    ///      envelope decoding.
+    event RecordAdded(
+        bytes32 indexed checksumHash,
+        uint256 index,
+        string checksum,
+        RecordCategory category,
+        string dataPointer
+    );
     event RecordStatusUpdated(bytes32 indexed checksumHash, uint256 index, string status);
     event RoleGranted(bytes32 indexed checksumHash, address indexed account, bytes32 role);
     event RoleRevoked(bytes32 indexed checksumHash, address indexed account, bytes32 role);
@@ -106,11 +126,17 @@ contract Registry {
     ///         `admin` or `editor` at record or registry scope. The version `index` inside the
     ///         anchored envelope makes every version's digest distinct, so re-anchoring
     ///         identical content is a new version, never a no-op revert.
+    /// @param  category    What the record attests to. Classification, not authorization.
+    /// @param  dataPointer Identifies the data, where `checksum` identifies the bytes — the
+    ///         pair tells the same data re-attested from different data. May be empty; that
+    ///         only collapses the caller's records onto one pointer for anyone deduping on it.
     function addRecord(
         string calldata uri,
         string calldata checksum,
         string calldata checksumAlgo,
-        string calldata metadata
+        string calldata metadata,
+        RecordCategory category,
+        string calldata dataPointer
     ) external returns (bytes32 checksumHash, uint256 index) {
         if (bytes(checksum).length == 0) revert EmptyChecksum();
         if (bytes(uri).length == 0) revert EmptyUri();
@@ -130,10 +156,12 @@ contract Registry {
                     checksum,
                     checksumAlgo,
                     metadata,
+                    category,
+                    dataPointer,
                     block.timestamp
                 )
             );
-        emit RecordAdded(checksumHash, index, checksum);
+        emit RecordAdded(checksumHash, index, checksum, category, dataPointer);
     }
 
     /// @notice Anchors a status for one record version. Requires `admin` or `editor` at record

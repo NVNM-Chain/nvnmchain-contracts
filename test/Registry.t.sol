@@ -46,8 +46,18 @@ contract RegistryTest is Test {
         internal
         returns (bytes32 checksumHash, uint256 index)
     {
+        return addRecord(as_, reg, checksum, Registry.RecordCategory.Unspecified, "");
+    }
+
+    function addRecord(
+        address as_,
+        Registry reg,
+        string memory checksum,
+        Registry.RecordCategory category,
+        string memory dataPointer
+    ) internal returns (bytes32 checksumHash, uint256 index) {
         vm.prank(as_);
-        return reg.addRecord("ipfs://a", checksum, "sha256", "{}");
+        return reg.addRecord("ipfs://a", checksum, "sha256", "{}", category, dataPointer);
     }
 
     // -- deployment ----------------------------------------------------------
@@ -93,9 +103,13 @@ contract RegistryTest is Test {
         // The same checksum in both, so the same key -- it derives from the checksum and
         // nothing else. Differing uris keep the two heads apart.
         vm.prank(creator);
-        a.addRecord("ipfs://in-a", "shared", "sha256", "{}");
+        a.addRecord(
+            "ipfs://in-a", "shared", "sha256", "{}", Registry.RecordCategory.Unspecified, ""
+        );
         vm.prank(creator);
-        b.addRecord("ipfs://in-b", "shared", "sha256", "{}");
+        b.addRecord(
+            "ipfs://in-b", "shared", "sha256", "{}", Registry.RecordCategory.Unspecified, ""
+        );
 
         IAnchoring anchoring = IAnchoring(ANCHORING_ADDRESS);
         bytes32 hash = keccak256("shared");
@@ -112,11 +126,13 @@ contract RegistryTest is Test {
     // -- records -------------------------------------------------------------
     function test_addRecord_identifiesByChecksumAndAnchorsSelfVerifyingDigest() public {
         Registry reg = Registry(deploy(creator, "docs"));
-        (bytes32 checksumHash, uint256 index) = addRecord(creator, reg, "abc");
+        (bytes32 checksumHash, uint256 index) =
+            addRecord(creator, reg, "abc", Registry.RecordCategory.AgenticAI, "did:x#1");
         assertEq(checksumHash, keccak256("abc"), "the checksum hash is the identity");
         assertEq(index, 1);
 
-        // The head is the digest of the exact envelope the event carried.
+        // The head is the digest of the exact envelope the event carried. Category and pointer
+        // are inside it, so neither can be restated after the fact without a new anchor.
         bytes memory envelope = abi.encode(
             reg.KIND_RECORD(),
             checksumHash,
@@ -125,9 +141,46 @@ contract RegistryTest is Test {
             "abc",
             "sha256",
             "{}",
+            Registry.RecordCategory.AgenticAI,
+            "did:x#1",
             block.timestamp
         );
         assertEq(reg.latestRecordDigest(checksumHash), keccak256(envelope));
+    }
+
+    /// A consumer deduping on `dataPointer` reads it from the log, not the envelope.
+    function test_addRecord_emitsCategoryAndPointer() public {
+        Registry reg = Registry(deploy(creator, "docs"));
+
+        vm.expectEmit(true, true, true, true);
+        emit Registry.RecordAdded(
+            keccak256("abc"), 1, "abc", Registry.RecordCategory.MultiPartyClinicalTrials, "trial-7"
+        );
+        addRecord(creator, reg, "abc", Registry.RecordCategory.MultiPartyClinicalTrials, "trial-7");
+    }
+
+    /// The enum is the validation. Both calls are byte-identical bar the category, so the
+    /// rejection can only be the category — not a stale selector or a mis-encoded argument.
+    function test_addRecord_rejectsAnUnknownCategory() public {
+        Registry reg = Registry(deploy(creator, "docs"));
+
+        vm.prank(creator);
+        (bool valid,) = address(reg).call(callAddRecord("abc", 4)); // AgenticAI, the last member
+        assertTrue(valid, "the last member of the enum is accepted");
+
+        vm.prank(creator);
+        (bool tooHigh,) = address(reg).call(callAddRecord("def", 5));
+        assertFalse(tooHigh, "one past it is refused at decode");
+    }
+
+    function callAddRecord(string memory checksum, uint8 category)
+        internal
+        pure
+        returns (bytes memory)
+    {
+        return abi.encodeWithSelector(
+            Registry.addRecord.selector, "ipfs://a", checksum, "sha256", "{}", category, ""
+        );
     }
 
     function test_sameChecksum_isOneStreamAndBumpsIndex() public {
@@ -170,11 +223,11 @@ contract RegistryTest is Test {
         // stream exists either.
         vm.prank(stranger);
         vm.expectRevert(Registry.EmptyChecksum.selector);
-        reg.addRecord("ipfs://a", "", "sha256", "{}");
+        reg.addRecord("ipfs://a", "", "sha256", "{}", Registry.RecordCategory.Unspecified, "");
 
         vm.prank(creator);
         vm.expectRevert(Registry.EmptyUri.selector);
-        reg.addRecord("", "abc", "sha256", "{}");
+        reg.addRecord("", "abc", "sha256", "{}", Registry.RecordCategory.Unspecified, "");
 
         assertEq(reg.versionCount(keccak256("abc")), 0, "neither started a stream");
     }
