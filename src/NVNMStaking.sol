@@ -93,7 +93,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     event RewardClaimed(address indexed validator, address indexed user, uint256 amount);
     event RewardCompounded(address indexed validator, address indexed from, uint256 amount);
     event CandidateSet(address indexed validator, bool active);
-    event CommitteeConfigSet(uint256 maxCommittee, uint256 acquiredWeight, uint256 maxDelegated);
+    event CommitteeConfigSet(uint256 maxSeats, uint256 acquiredWeight, uint256 maxDelegated);
     event CandidacyBondSet(uint256 bond);
     event MinAcquiredSet(uint256 minAcquired);
     event MinSeatsSet(uint256 minSeats);
@@ -418,17 +418,16 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     // -- committee election --------------------------------------------------
     /// @notice Election knobs: committee size (21 at Phase 5), acquired-stake overweight, and
     ///         the per-validator delegation cap.
-    function setCommitteeConfig(
-        uint256 maxCommittee,
-        uint256 acquiredWeight_,
-        uint256 maxDelegated_
-    ) external onlyOwner {
-        if (maxCommittee == 0) revert ZeroAmount();
+    function setCommitteeConfig(uint256 maxSeats_, uint256 acquiredWeight_, uint256 maxDelegated_)
+        external
+        onlyOwner
+    {
+        if (maxSeats_ == 0) revert ZeroAmount();
         StakingStorage storage $ = _s();
-        $.maxSeats = maxCommittee;
+        $.maxSeats = maxSeats_;
         $.acquiredWeight = acquiredWeight_;
         $.maxDelegated = maxDelegated_;
-        emit CommitteeConfigSet(maxCommittee, acquiredWeight_, maxDelegated_);
+        emit CommitteeConfigSet(maxSeats_, acquiredWeight_, maxDelegated_);
     }
 
     /// @notice Set the acquired-stake floor for electability — the 1M NVNM minimum. 0 disables
@@ -589,7 +588,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     function committeeConfig()
         external
         view
-        returns (uint256 maxCommittee, uint256 acquiredWeight_, uint256 maxDelegated_)
+        returns (uint256 maxSeats_, uint256 acquiredWeight_, uint256 maxDelegated_)
     {
         StakingStorage storage $ = _s();
         return ($.maxSeats, $.acquiredWeight, $.maxDelegated);
