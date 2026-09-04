@@ -10,18 +10,17 @@ is enshrined in the node; this repo talks to it through `IAnchoring`.
 One contract per registry: versioned checksum records with scoped role-based access control,
 deployed by a factory.
 
-The precompile at `0x…0a00` is a *caller-partitioned* commitment log, so a registry's own
-address is its partition — `IAnchoring.latest(registry, key)` is the on-chain source of truth,
-and no key, mapping or envelope carries a registry id. A single contract fronting many
-registries would throw that partition away and rebuild it by hand.
+The precompile at `0x…0a00` keeps one Merkle Mountain Range per caller, so a registry's own
+address is its MMR — `IAnchoring.root(registry)` is what a proof is checked against — and no
+mapping or envelope carries a registry id. A single contract fronting many registries would throw that
+partition away and rebuild it by hand.
 
-The contract anchors rather than stores: every record version and status is committed through
-the precompile, and only what authorization and id assignment need — counters and role
-membership — lives in contract storage. Each envelope leads with a `bytes32` kind (`record`,
-`status`), so an indexer classifies a payload from the log rather than by matching it against
-a derived key. Envelopes stay distinct per version — the version `index`, and a sequence
-number for status — so re-anchoring identical content is a new version rather than a
-`CommitmentUnchanged` revert.
+The contract appends rather than stores: every record version and status is one leaf,
+committing to an envelope the precompile logs, and only what authorization and version
+numbering need — counters and role membership — lives in contract storage. Each envelope leads
+with a `bytes32` kind (`record`, `status`), so an indexer classifies a leaf's payload from the
+log alone. Envelopes stay distinct per version — the version `index`, and a sequence number for
+status — so re-adding identical content is a distinct leaf.
 
 Role changes are **not** anchored. Membership is the registry's state, read with `hasRole`,
 and history is its own `RoleGranted`/`RoleRevoked`, which carry every field. A third copy in
@@ -31,6 +30,16 @@ Roles are registry-scoped (the whole contract, needing no derivation — the rol
 or record-scoped (one checksum within it), over `admin` and `editor`. The owner (a Safe) is the
 break-glass admin: it may grant a registry `admin` without holding one, which is what keeps the
 "last admin cannot be revoked" rule recoverable.
+
+The MMR's count and peaks are the precompile's state — a peak that merges away is left in
+its slot, so a height pays state creation once — so a write carries no witness and several may
+share a transaction. That keeps the arithmetic, and its bytecode, out of a contract deployed
+once per registry: `appendLeaf` and `appendLeaves` forward the call as it came, once the
+caller's role is checked, and their arguments are the precompile's. `appendLeaves` is the bulk
+anchor — a batch as the roots of aligned perfect subtrees, one call per registry, its rows
+staying off-chain — which is how a corpus loads. A row proves against the root with `log n`
+siblings through `MMRVerifier`, deployed once, with the peaks the event or `IAnchoring.state`
+reports; `MMR.sol` is the same arithmetic in Solidity, for the verifier and the test stand-in.
 
 Registries are immutable: upgrading means deploying a new one and re-granting its roles.
 What a registry anchors is a commitment, provable under the address that wrote it forever, so
@@ -87,6 +96,8 @@ collapsing into one.
 - `src/Registry.sol` — one registry, deployed outright and immutable
 - `src/RegistryFactory.sol` — deploys one Registry per registry, outright
 - `src/interfaces/IAnchoring.sol` — the precompile's interface and address
+- `src/MMR.sol`, `src/MMRVerifier.sol` — the MMR's arithmetic, and inclusion proofs against any
+  root, deployed once
 - `src/NVNMStaking.sol` — delegated staking and committee election
 - `src/FeeRouter.sol` — per-validator fee splitter and factory
 - `src/GuardedSwapper.sol` — guarded buyback swapper
