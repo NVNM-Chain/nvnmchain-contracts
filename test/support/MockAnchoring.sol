@@ -52,10 +52,12 @@ contract MockAnchoring is IAnchoring {
         if (chunkRoots.length != chunkHeights.length) {
             revert ChunksMismatch();
         }
+        if (chunkRoots.length == 0) revert EmptyBatch();
         uint256 first = counts[msg.sender];
         bytes32[] memory live = _open(msg.sender, first, chunkRoots.length);
         (uint256 len, uint256 total) = (live.length - chunkRoots.length, first);
         for (uint256 i = 0; i < chunkRoots.length; i++) {
+            if (chunkRoots[i] == bytes32(0)) revert ZeroChunkRoot();
             (len, total) = MMR.push(live, len, total, chunkHeights[i], chunkRoots[i]);
         }
         (bytes32 newRoot, bytes32[] memory peaks) = _close(msg.sender, live, total);

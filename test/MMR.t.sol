@@ -147,6 +147,20 @@ contract MMRTest is Test {
         assertEq(a.mmrRoot(), ROOTS[4]);
     }
 
+    /// The precompile's other two shape refusals, raised the same way by the stand-in.
+    function test_an_empty_batch_and_a_zero_chunk_are_refused() public {
+        bytes32[] memory roots = new bytes32[](0);
+        uint8[] memory heights = new uint8[](0);
+        vm.expectRevert(IAnchoring.EmptyBatch.selector);
+        a.appendLeaves(roots, heights, "");
+
+        roots = new bytes32[](1);
+        heights = new uint8[](1);
+        vm.expectRevert(IAnchoring.ZeroChunkRoot.selector);
+        a.appendLeaves(roots, heights, "");
+        assertEq(a.mmrRoot(), bytes32(0), "still empty");
+    }
+
     function test_appending_takes_a_registry_writer() public {
         vm.stopPrank();
         vm.prank(stranger);

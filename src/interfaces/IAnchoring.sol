@@ -52,6 +52,10 @@ interface IAnchoring {
     error ChunkNotAligned(uint256 count, uint256 height);
     /// @notice `chunkRoots` and `chunkHeights` differ in length.
     error ChunksMismatch();
+    /// @notice `appendLeaves` was given no chunks.
+    error EmptyBatch();
+    /// @notice A zero chunk root, which nothing hashes to.
+    error ZeroChunkRoot();
 }
 
 /// @dev Fixed at genesis.
