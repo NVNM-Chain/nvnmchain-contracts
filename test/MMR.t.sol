@@ -159,6 +159,17 @@ contract MMRTest is Test {
         vm.prank(editor);
         a.appendLeaf(c(1), "");
         assertEq(a.mmrRoot(), ROOTS[0], "an editor at registry scope appends");
+
+        // A record-scoped editor writes that record's versions, not the registry's leaves.
+        vm.prank(creator);
+        a.addRecord("ipfs://a", "abc", "sha256", "{}", Registry.RecordCategory.Unspecified, "");
+        vm.prank(creator);
+        a.grantRole("abc", stranger, role);
+        vm.prank(stranger);
+        vm.expectRevert(Registry.Unauthorized.selector);
+        a.appendLeaf(c(2), "");
+        (uint256 count,) = anchoring.state(address(a));
+        assertEq(count, 2, "the editor's leaf and the record");
     }
 
     /// What the log says: the registry is the namespace, and the event carries the peaks a

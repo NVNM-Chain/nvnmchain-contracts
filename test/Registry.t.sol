@@ -280,6 +280,25 @@ contract RegistryTest is Test {
         assertEq(abi.decode(envelope, (bytes32)), reg.KIND_STATUS());
     }
 
+    /// A registry-scoped writer may append a bare leaf, but not one leading with this
+    /// contract's own kinds: a reader takes a record's author and version from the envelope.
+    function test_appendLeaf_refusesTheRegistrysOwnKinds() public {
+        Registry reg = Registry(deploy(creator, "docs"));
+        bytes32[2] memory kinds = [reg.KIND_RECORD(), reg.KIND_STATUS()];
+        for (uint256 i; i < kinds.length; i++) {
+            bytes memory forged = abi.encode(kinds[i], keccak256("abc"));
+            vm.prank(creator);
+            vm.expectRevert(Registry.ReservedKind.selector);
+            reg.appendLeaf(keccak256(forged), forged);
+        }
+
+        // Anything else is the writer's to shape, a payload shorter than a kind included.
+        vm.prank(creator);
+        reg.appendLeaf(keccak256("bare"), "bare");
+        (uint256 count,) = IAnchoring(ANCHORING_ADDRESS).state(address(reg));
+        assertEq(count, 1);
+    }
+
     // -- RBAC ----------------------------------------------------------------
     function test_grantAndRevoke_registryEditor() public {
         Registry reg = Registry(deploy(creator, "docs"));

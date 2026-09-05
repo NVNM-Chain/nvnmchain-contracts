@@ -103,6 +103,8 @@ contract Registry {
     error MissingRole(address account, bytes32 role);
     error LastAdmin();
     error Unauthorized();
+    /// A bare leaf leading with `record` or `status`, this contract's own kinds.
+    error ReservedKind();
 
     /// @notice Deployed by {RegistryFactory}, with its creator as the first admin.
     constructor(address admin, address factory_) {
@@ -192,8 +194,14 @@ contract Registry {
     /// @notice Appends one leaf whose commitment is the caller's to shape: a record that lives
     ///         off-chain and proves against the root instead of being an envelope here.
     ///         Requires `admin` or `editor` at registry scope. Arguments are the precompile's.
-    function appendLeaf(bytes32, bytes calldata) external returns (bytes32 root) {
+    ///         A payload leading with `record` or `status` is refused: a reader takes the
+    ///         author and version inside those on this contract's word.
+    function appendLeaf(bytes32, bytes calldata metadata) external returns (bytes32 root) {
         _checkRegistryWriter();
+        if (metadata.length >= 32) {
+            bytes32 kind = bytes32(metadata[:32]);
+            if (kind == KIND_RECORD || kind == KIND_STATUS) revert ReservedKind();
+        }
         return _forward();
     }
 

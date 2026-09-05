@@ -35,7 +35,8 @@ The MMR's count and peaks are the precompile's state — a peak that merges away
 its slot, so a height pays state creation once — so a write carries no witness and several may
 share a transaction. That keeps the arithmetic, and its bytecode, out of a contract deployed
 once per registry: `appendLeaf` and `appendLeaves` forward the call as it came, once the
-caller's role is checked, and their arguments are the precompile's. `appendLeaves` is the bulk
+caller's role is checked, and their arguments are the precompile's. `appendLeaf` refuses a
+payload leading with `record` or `status`, the contract's own kinds. `appendLeaves` is the bulk
 anchor — a batch as the roots of aligned perfect subtrees, one call per registry, its rows
 staying off-chain — which is how a corpus loads. A row proves against the root with `log n`
 siblings through `MMRVerifier`, deployed once, with the peaks the event or `IAnchoring.state`
