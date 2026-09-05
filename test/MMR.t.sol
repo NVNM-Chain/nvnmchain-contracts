@@ -91,6 +91,15 @@ contract MMRTest is Test {
         return nodes[0];
     }
 
+    /// A perfect subtree over `size` commitments from `from`, as `appendLeaves` takes it.
+    function chunk(uint256 from, uint256 size) internal pure returns (IAnchoring.Chunk memory) {
+        uint8 height;
+        for (uint256 s = size; s > 1; s >>= 1) {
+            height++;
+        }
+        return IAnchoring.Chunk({ root: perfect(from, size), height: height });
+    }
+
     function appendAll(uint256 upTo) internal {
         for (uint256 i = 1; i <= upTo; i++) {
             a.appendLeaf(c(i), "");
@@ -113,12 +122,9 @@ contract MMRTest is Test {
 
     function test_a_batch_from_empty_reaches_the_sequential_root() public {
         // 13 leaves cut aligned from zero: sizes 8, 4, 1.
-        bytes32[] memory roots = new bytes32[](3);
-        uint8[] memory heights = new uint8[](3);
-        (roots[0], heights[0]) = (perfect(1, 8), 3);
-        (roots[1], heights[1]) = (perfect(9, 4), 2);
-        (roots[2], heights[2]) = (perfect(13, 1), 0);
-        bytes32 root = a.appendLeaves(roots, heights, "");
+        IAnchoring.Chunk[] memory chunks = new IAnchoring.Chunk[](3);
+        (chunks[0], chunks[1], chunks[2]) = (chunk(1, 8), chunk(9, 4), chunk(13, 1));
+        bytes32 root = a.appendLeaves(chunks, "");
         assertEq(root, ROOTS[12], "one transaction, thirteen leaves");
         assertEq(a.mmrRoot(), ROOTS[12]);
     }
@@ -126,39 +132,41 @@ contract MMRTest is Test {
     function test_a_batch_after_a_prefix_is_cut_to_the_alignment() public {
         // Five leaves one by one, then eight more: [5,6) h0, [6,8) h1, [8,12) h2, [12,13) h0.
         appendAll(5);
-        bytes32[] memory roots = new bytes32[](4);
-        uint8[] memory heights = new uint8[](4);
-        (roots[0], heights[0]) = (perfect(6, 1), 0);
-        (roots[1], heights[1]) = (perfect(7, 2), 1);
-        (roots[2], heights[2]) = (perfect(9, 4), 2);
-        (roots[3], heights[3]) = (perfect(13, 1), 0);
-        a.appendLeaves(roots, heights, "");
+        IAnchoring.Chunk[] memory chunks = new IAnchoring.Chunk[](4);
+        (chunks[0], chunks[1]) = (chunk(6, 1), chunk(7, 2));
+        (chunks[2], chunks[3]) = (chunk(9, 4), chunk(13, 1));
+        a.appendLeaves(chunks, "");
         assertEq(a.mmrRoot(), ROOTS[12], "sizes rise to the boundary and fall after it");
     }
 
     /// The precompile's refusals come back through the registry as they were raised.
     function test_a_chunk_off_the_alignment_is_refused() public {
         appendAll(5);
-        bytes32[] memory roots = new bytes32[](1);
-        uint8[] memory heights = new uint8[](1);
-        (roots[0], heights[0]) = (perfect(6, 2), 1); // a pair at count 5: 5 % 2 != 0
+        IAnchoring.Chunk[] memory chunks = new IAnchoring.Chunk[](1);
+        chunks[0] = chunk(6, 2); // a pair at count 5: 5 % 2 != 0
         vm.expectRevert(abi.encodeWithSelector(IAnchoring.ChunkNotAligned.selector, 5, 1));
-        a.appendLeaves(roots, heights, "");
+        a.appendLeaves(chunks, "");
         assertEq(a.mmrRoot(), ROOTS[4]);
     }
 
-    /// The precompile's other two shape refusals, raised the same way by the stand-in.
-    function test_an_empty_batch_and_a_zero_chunk_are_refused() public {
-        bytes32[] memory roots = new bytes32[](0);
-        uint8[] memory heights = new uint8[](0);
-        vm.expectRevert(IAnchoring.EmptyBatch.selector);
-        a.appendLeaves(roots, heights, "");
+    /// An empty batch is a no-op that answers with the root; a zero root is refused. Both as
+    /// the precompile has them, so a wrapper test means what it says.
+    function test_an_empty_batch_is_a_noop_and_a_zero_chunk_is_refused() public {
+        IAnchoring.Chunk[] memory chunks = new IAnchoring.Chunk[](0);
+        assertEq(a.appendLeaves(chunks, ""), bytes32(0), "the root, which is still empty");
 
-        roots = new bytes32[](1);
-        heights = new uint8[](1);
+        chunks = new IAnchoring.Chunk[](1); // a zero root, at height 0
         vm.expectRevert(IAnchoring.ZeroChunkRoot.selector);
-        a.appendLeaves(roots, heights, "");
+        a.appendLeaves(chunks, "");
         assertEq(a.mmrRoot(), bytes32(0), "still empty");
+
+        // A zero root is refused before any alignment is, wherever it sits in the batch.
+        appendAll(1);
+        chunks = new IAnchoring.Chunk[](2);
+        chunks[0] = chunk(2, 2); // a pair at count 1: misaligned
+        vm.expectRevert(IAnchoring.ZeroChunkRoot.selector);
+        a.appendLeaves(chunks, "");
+        assertEq(a.mmrRoot(), ROOTS[0]);
     }
 
     function test_appending_takes_a_registry_writer() public {
@@ -194,7 +202,7 @@ contract MMRTest is Test {
         bytes32[] memory next = pushed(peaks, count, 0, MMR.hashLeaf(c(6)));
 
         vm.expectEmit(true, true, true, true, ANCHORING_ADDRESS);
-        emit IAnchoring.LeafAppended(address(a), 5, c(6), ROOTS[5], next, "provenance");
+        emit IAnchoring.LeafAppended(address(a), 5, c(6), next, "provenance");
         a.appendLeaf(c(6), "provenance");
 
         (count, peaks) = anchoring.state(address(a));

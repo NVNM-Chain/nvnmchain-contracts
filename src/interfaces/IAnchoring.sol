@@ -12,13 +12,18 @@ interface IAnchoring {
     /// @notice Appends one leaf to the caller's MMR.
     function appendLeaf(bytes32 commitment, bytes calldata metadata) external returns (bytes32 root);
 
+    /// @notice An aligned perfect subtree to append: its root and height.
+    struct Chunk {
+        bytes32 root;
+        uint8 height;
+    }
+
     /// @notice Appends a batch as the roots of aligned perfect subtrees, in leaf order: a chunk
-    ///         of height `h` merges only when the count is a multiple of `2^h`.
-    function appendLeaves(
-        bytes32[] calldata chunkRoots,
-        uint8[] calldata chunkHeights,
-        bytes calldata metadata
-    ) external returns (bytes32 root);
+    ///         of height `h` merges only when the count is a multiple of `2^h`. An empty batch
+    ///         changes nothing and returns the current root.
+    function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata)
+        external
+        returns (bytes32 root);
 
     /// @notice The root of `namespace`'s MMR, or zero if nothing was ever appended.
     function root(address namespace) external view returns (bytes32);
@@ -31,7 +36,6 @@ interface IAnchoring {
         address indexed namespace,
         uint256 indexed index,
         bytes32 commitment,
-        bytes32 root,
         bytes32[] peaks,
         bytes metadata
     );
@@ -41,19 +45,13 @@ interface IAnchoring {
         address indexed namespace,
         uint256 indexed firstLeaf,
         uint256 count,
-        bytes32[] chunkRoots,
-        uint8[] chunkHeights,
-        bytes32 root,
+        Chunk[] chunks,
         bytes32[] peaks,
         bytes metadata
     );
 
     /// @notice A chunk of `height` at `count`, which is not a multiple of its size.
     error ChunkNotAligned(uint256 count, uint256 height);
-    /// @notice `chunkRoots` and `chunkHeights` differ in length.
-    error ChunksMismatch();
-    /// @notice `appendLeaves` was given no chunks.
-    error EmptyBatch();
     /// @notice A zero chunk root, which nothing hashes to.
     error ZeroChunkRoot();
 }

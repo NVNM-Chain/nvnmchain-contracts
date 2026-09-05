@@ -208,7 +208,7 @@ contract Registry {
     /// @notice The bulk anchor: a batch as the roots of aligned perfect subtrees, in leaf order,
     ///         one call however many rows. How a corpus loads, its rows staying off-chain.
     ///         Requires `admin` or `editor` at registry scope. Arguments are the precompile's.
-    function appendLeaves(bytes32[] calldata, uint8[] calldata, bytes calldata)
+    function appendLeaves(IAnchoring.Chunk[] calldata, bytes calldata)
         external
         returns (bytes32 root)
     {

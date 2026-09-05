@@ -40,31 +40,32 @@ contract MockAnchoring is IAnchoring {
         (bytes32 newRoot, bytes32[] memory peaks) = _close(msg.sender, live, total);
         lastCommitment[msg.sender] = commitment;
         lastMetadata[msg.sender] = metadata;
-        emit LeafAppended(msg.sender, first, commitment, newRoot, peaks, metadata);
+        emit LeafAppended(msg.sender, first, commitment, peaks, metadata);
         return newRoot;
     }
 
-    function appendLeaves(
-        bytes32[] calldata chunkRoots,
-        uint8[] calldata chunkHeights,
-        bytes calldata metadata
-    ) external returns (bytes32) {
-        if (chunkRoots.length != chunkHeights.length) {
-            revert ChunksMismatch();
+    function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata)
+        external
+        returns (bytes32)
+    {
+        if (chunks.length == 0) {
+            // A no-op that returns the current root, as the precompile does.
+            bytes32[] memory held = _open(msg.sender, counts[msg.sender], 0);
+            return MMR.bag(held, held.length);
         }
-        if (chunkRoots.length == 0) revert EmptyBatch();
+        // Every root before any height, as the precompile checks them.
+        for (uint256 i = 0; i < chunks.length; i++) {
+            if (chunks[i].root == bytes32(0)) revert ZeroChunkRoot();
+        }
         uint256 first = counts[msg.sender];
-        bytes32[] memory live = _open(msg.sender, first, chunkRoots.length);
-        (uint256 len, uint256 total) = (live.length - chunkRoots.length, first);
-        for (uint256 i = 0; i < chunkRoots.length; i++) {
-            if (chunkRoots[i] == bytes32(0)) revert ZeroChunkRoot();
-            (len, total) = MMR.push(live, len, total, chunkHeights[i], chunkRoots[i]);
+        bytes32[] memory live = _open(msg.sender, first, chunks.length);
+        (uint256 len, uint256 total) = (live.length - chunks.length, first);
+        for (uint256 i = 0; i < chunks.length; i++) {
+            (len, total) = MMR.push(live, len, total, chunks[i].height, chunks[i].root);
         }
         (bytes32 newRoot, bytes32[] memory peaks) = _close(msg.sender, live, total);
         lastMetadata[msg.sender] = metadata;
-        emit LeavesAppended(
-            msg.sender, first, total, chunkRoots, chunkHeights, newRoot, peaks, metadata
-        );
+        emit LeavesAppended(msg.sender, first, total, chunks, peaks, metadata);
         return newRoot;
     }
 
