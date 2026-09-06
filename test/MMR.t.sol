@@ -110,9 +110,8 @@ contract MMRTest is Test {
 
     function test_sequential_appends_reach_the_reference_roots() public {
         for (uint256 i = 1; i <= 16; i++) {
-            bytes32 root = a.appendLeaf(c(i), "");
-            assertEq(root, ROOTS[i - 1], "root after leaf i, as returned");
-            assertEq(a.mmrRoot(), ROOTS[i - 1], "root after leaf i, as read");
+            a.appendLeaf(c(i), "");
+            assertEq(a.mmrRoot(), ROOTS[i - 1], "root after leaf i");
             (uint256 count, bytes32[] memory peaks) = anchoring.state(address(a));
             assertEq(count, i);
             assertEq(peaks.length, MMR.popcount(i), "one peak per set bit");
@@ -124,9 +123,8 @@ contract MMRTest is Test {
         // 13 leaves cut aligned from zero: sizes 8, 4, 1.
         IAnchoring.Chunk[] memory chunks = new IAnchoring.Chunk[](3);
         (chunks[0], chunks[1], chunks[2]) = (chunk(1, 8), chunk(9, 4), chunk(13, 1));
-        bytes32 root = a.appendLeaves(chunks, "");
-        assertEq(root, ROOTS[12], "one transaction, thirteen leaves");
-        assertEq(a.mmrRoot(), ROOTS[12]);
+        a.appendLeaves(chunks, "");
+        assertEq(a.mmrRoot(), ROOTS[12], "one transaction, thirteen leaves");
     }
 
     function test_a_batch_after_a_prefix_is_cut_to_the_alignment() public {
@@ -149,11 +147,12 @@ contract MMRTest is Test {
         assertEq(a.mmrRoot(), ROOTS[4]);
     }
 
-    /// An empty batch is a no-op that answers with the root; a zero root is refused. Both as
-    /// the precompile has them, so a wrapper test means what it says.
+    /// An empty batch is a no-op; a zero root is refused. Both as the precompile has them, so
+    /// a wrapper test means what it says.
     function test_an_empty_batch_is_a_noop_and_a_zero_chunk_is_refused() public {
         IAnchoring.Chunk[] memory chunks = new IAnchoring.Chunk[](0);
-        assertEq(a.appendLeaves(chunks, ""), bytes32(0), "the root, which is still empty");
+        a.appendLeaves(chunks, "");
+        assertEq(a.mmrRoot(), bytes32(0), "the root, which is still empty");
 
         chunks = new IAnchoring.Chunk[](1); // a zero root, at height 0
         vm.expectRevert(IAnchoring.ZeroChunkRoot.selector);

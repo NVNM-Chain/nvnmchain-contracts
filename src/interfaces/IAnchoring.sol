@@ -9,8 +9,9 @@ pragma solidity ^0.8.23;
 ///         A leaf is `keccak256("leaf" ‖ commitment)`, a merge `keccak256("merge" ‖ left ‖ right)`,
 ///         and the root bags the peaks highest first, `keccak256("bag" ‖ acc ‖ peak)`.
 interface IAnchoring {
-    /// @notice Appends one leaf to the caller's MMR.
-    function appendLeaf(bytes32 commitment, bytes calldata metadata) external returns (bytes32 root);
+    /// @notice Appends one leaf to the caller's MMR. Nothing comes back: the root is what the
+    ///         event's peaks bag to, or `root(namespace)`.
+    function appendLeaf(bytes32 commitment, bytes calldata metadata) external;
 
     /// @notice An aligned perfect subtree to append: its root and height.
     struct Chunk {
@@ -20,10 +21,8 @@ interface IAnchoring {
 
     /// @notice Appends a batch as the roots of aligned perfect subtrees, in leaf order: a chunk
     ///         of height `h` merges only when the count is a multiple of `2^h`. An empty batch
-    ///         changes nothing and returns the current root.
-    function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata)
-        external
-        returns (bytes32 root);
+    ///         changes nothing.
+    function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata) external;
 
     /// @notice The root of `namespace`'s MMR, or zero if nothing was ever appended.
     function root(address namespace) external view returns (bytes32);

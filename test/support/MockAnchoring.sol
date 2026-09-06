@@ -6,8 +6,8 @@ import { IAnchoring } from "../../src/interfaces/IAnchoring.sol";
 
 /// @notice Test stand-in for the anchoring precompile, etched at its address so wrapper tests
 ///         run in a plain forge EVM. Reproduces the semantics the wrapper depends on: one MMR
-///         per caller, its count and peaks kept, chunks aligned to the count, and the root
-///         returned and emitted with the peaks.
+///         per caller, its count and peaks kept, chunks aligned to the count, and the peaks
+///         emitted, nothing returned.
 contract MockAnchoring is IAnchoring {
     mapping(address => uint256) private counts;
     /// @dev height => peak. A merged-away peak is left in place, as the precompile leaves it;
@@ -33,26 +33,18 @@ contract MockAnchoring is IAnchoring {
         peaks = _open(namespace, count, 0);
     }
 
-    function appendLeaf(bytes32 commitment, bytes calldata metadata) external returns (bytes32) {
+    function appendLeaf(bytes32 commitment, bytes calldata metadata) external {
         uint256 first = counts[msg.sender];
         bytes32[] memory live = _open(msg.sender, first, 1);
         (, uint256 total) = MMR.push(live, live.length - 1, first, 0, MMR.hashLeaf(commitment));
-        (bytes32 newRoot, bytes32[] memory peaks) = _close(msg.sender, live, total);
+        bytes32[] memory peaks = _close(msg.sender, live, total);
         lastCommitment[msg.sender] = commitment;
         lastMetadata[msg.sender] = metadata;
         emit LeafAppended(msg.sender, first, commitment, peaks, metadata);
-        return newRoot;
     }
 
-    function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata)
-        external
-        returns (bytes32)
-    {
-        if (chunks.length == 0) {
-            // A no-op that returns the current root, as the precompile does.
-            bytes32[] memory held = _open(msg.sender, counts[msg.sender], 0);
-            return MMR.bag(held, held.length);
-        }
+    function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata) external {
+        if (chunks.length == 0) return; // a no-op, as the precompile has it
         // Every root before any height, as the precompile checks them.
         for (uint256 i = 0; i < chunks.length; i++) {
             if (chunks[i].root == bytes32(0)) revert ZeroChunkRoot();
@@ -63,10 +55,9 @@ contract MockAnchoring is IAnchoring {
         for (uint256 i = 0; i < chunks.length; i++) {
             (len, total) = MMR.push(live, len, total, chunks[i].height, chunks[i].root);
         }
-        (bytes32 newRoot, bytes32[] memory peaks) = _close(msg.sender, live, total);
+        bytes32[] memory peaks = _close(msg.sender, live, total);
         lastMetadata[msg.sender] = metadata;
         emit LeavesAppended(msg.sender, first, total, chunks, peaks, metadata);
-        return newRoot;
     }
 
     /// @notice What the last `appendLeaf` from `namespace` carried. Test-only; see above.
@@ -98,7 +89,7 @@ contract MockAnchoring is IAnchoring {
     ///      merged-away peak in place too, so a height's slot is only ever created once.
     function _close(address namespace, bytes32[] memory live, uint256 total)
         private
-        returns (bytes32 newRoot, bytes32[] memory peaks)
+        returns (bytes32[] memory peaks)
     {
         counts[namespace] = total;
         peaks = new bytes32[](MMR.popcount(total));
@@ -111,6 +102,5 @@ contract MockAnchoring is IAnchoring {
                 at++;
             }
         }
-        newRoot = MMR.bag(peaks, peaks.length);
     }
 }

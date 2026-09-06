@@ -196,37 +196,33 @@ contract Registry {
     ///         Requires `admin` or `editor` at registry scope. Arguments are the precompile's.
     ///         A payload leading with `record` or `status` is refused: a reader takes the
     ///         author and version inside those on this contract's word.
-    function appendLeaf(bytes32, bytes calldata metadata) external returns (bytes32 root) {
+    function appendLeaf(bytes32, bytes calldata metadata) external {
         _checkRegistryWriter();
         if (metadata.length >= 32) {
             bytes32 kind = bytes32(metadata[:32]);
             if (kind == KIND_RECORD || kind == KIND_STATUS) revert ReservedKind();
         }
-        return _forward();
+        _forward();
     }
 
     /// @notice The bulk anchor: a batch as the roots of aligned perfect subtrees, in leaf order,
     ///         one call however many rows. How a corpus loads, its rows staying off-chain.
     ///         Requires `admin` or `editor` at registry scope. Arguments are the precompile's.
-    function appendLeaves(IAnchoring.Chunk[] calldata, bytes calldata)
-        external
-        returns (bytes32 root)
-    {
+    function appendLeaves(IAnchoring.Chunk[] calldata, bytes calldata) external {
         _checkRegistryWriter();
-        return _forward();
+        _forward();
     }
 
     /// @dev The call as it came, made under this contract's address. The precompile's signature
-    ///      is this one's, so nothing is decoded to be encoded again, and its refusal is
-    ///      returned as it was raised. A `call`, never `delegatecall`.
-    function _forward() private returns (bytes32 root) {
+    ///      is this one's, so nothing is decoded to be encoded again, nothing comes back, and
+    ///      its refusal is returned as it was raised. A `call`, never `delegatecall`.
+    function _forward() private {
         (bool ok, bytes memory out) = ANCHORING_ADDRESS.call(msg.data);
         if (!ok) {
             assembly ("memory-safe") {
                 revert(add(out, 32), mload(out))
             }
         }
-        root = abi.decode(out, (bytes32));
     }
 
     // -- RBAC ----------------------------------------------------------------

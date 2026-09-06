@@ -12,8 +12,8 @@ deployed by a factory.
 
 The precompile at `0x…0a00` keeps one Merkle Mountain Range per caller, so a registry's own
 address is its MMR — `IAnchoring.root(registry)` is what a proof is checked against — and no
-mapping or envelope carries a registry id. A single contract fronting many registries would throw that
-partition away and rebuild it by hand.
+mapping or envelope carries a registry id. A single contract fronting many registries would
+throw that partition away and rebuild it by hand.
 
 The contract appends rather than stores: every record version and status is one leaf,
 committing to an envelope the precompile logs, and only what authorization and version
@@ -41,6 +41,11 @@ anchor — a batch as the roots of aligned perfect subtrees, one call per regist
 staying off-chain — which is how a corpus loads. A row proves against the root with `log n`
 siblings through `MMRVerifier`, deployed once, with the peaks the event or `IAnchoring.state`
 reports; `MMR.sol` is the same arithmetic in Solidity, for the verifier and the test stand-in.
+
+A chunk is a subtree root, so `appendLeaves` cannot refuse what a leaf under it says: a
+registry-scoped writer can put any leaf hash into the tree, a forged `record` envelope's
+included, and later prove it there. Only an envelope that appears in a `LeafAppended` log is
+the contract's word; a proof alone attributes nothing to the registry.
 
 Registries are immutable: upgrading means deploying a new one and re-granting its roles.
 What a registry anchors is a commitment, provable under the address that wrote it forever, so
