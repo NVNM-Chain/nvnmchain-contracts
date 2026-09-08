@@ -10,23 +10,28 @@ interface IOwned {
 }
 
 /// @title Registry
-/// @notice One registry of checksum records, versioned per checksum, with scoped RBAC —
-///         anchored through the anchoring precompile rather than stored here. This contract
-///         keeps only role membership and a version count per record; every version and status
-///         is committed into the precompile's log under *this contract's* address, so
-///         `IAnchoring.latest(address(this), key)` is the on-chain source of truth.
-/// @dev One deployment per registry, from {RegistryFactory}. That is the whole reason this
-///      contract has no `registryId`: the precompile is a caller-partitioned log, so the
-///      deployment address *is* the partition, and a payload is only meaningful with the
-///      namespace it was anchored under beside it.
+/// @notice One registry of checksum records, versioned per checksum, with scoped RBAC. Every
+///         version and status is a leaf of this contract's Merkle Mountain Range in the
+///         anchoring precompile, never stored here: the contract keeps only role membership and
+///         a version count per record. A leaf's payload is in the precompile's log, and it
+///         proves against `IAnchoring.root(address(this))` with `log n` siblings, forever, through
+///         {MMRVerifier}.
+/// @dev One deployment per registry, from {RegistryFactory}. The precompile is partitioned by
+///      caller, so the deployment address *is* the registry's MMR, and a payload is only
+///      meaningful with the namespace it was appended under beside it. No registry id anywhere.
 ///
-///      A record has no id either: `keccak256(checksum)` *is* its identity, which is what
-///      `addRecord` already looked one up by. Numbering is log order, an indexer's job.
+///      The MMR's count and peaks are the precompile's state, so a write carries no witness
+///      and several may share a transaction. That is also what keeps the arithmetic, and its
+///      bytecode, out of a contract deployed once per registry: the two leaf entry points
+///      forward the call as it came, once the caller's role is checked.
+///
+///      A record has no id: `keccak256(checksum)` *is* its identity, which is what `addRecord`
+///      already looked one up by. Numbering is log order, an indexer's job.
 ///
 ///      Roles are registry-scoped (this whole contract — the role is its own id, no derivation)
 ///      or record-scoped (one checksum within it), over `admin` and `editor`. They are *not*
-///      anchored: membership is this contract's state, history is `RoleGranted`/`RoleRevoked`,
-///      and a third copy in the anchored log would only be something to drift.
+///      leaves: membership is this contract's state, history is `RoleGranted`/`RoleRevoked`,
+///      and a third copy in the log would only be something to drift.
 ///
 ///      Immutable once deployed: no proxy, no `delegatecall`, so storage is plain. Break-glass
 ///      admin is read live through the factory rather than copied here, so transferring
@@ -49,6 +54,8 @@ contract Registry {
     }
 
     // -- envelope kinds ------------------------------------------------------
+    /// @dev Every envelope this contract commits to leads with its kind, so an indexer
+    ///      classifies a leaf's payload from the log alone.
     bytes32 public constant KIND_RECORD = "record";
     bytes32 public constant KIND_STATUS = "status";
 
@@ -68,14 +75,13 @@ contract Registry {
     mapping(bytes32 => mapping(address => bool)) private member;
     /// Registry-level admin count, so last-admin protection is O(1).
     uint256 private adminCount;
-    /// Discriminator for status envelopes, so idempotent re-assertions never
-    /// collide with the precompile's no-op rule.
+    /// Discriminator for status envelopes, so re-asserting a status is a distinct leaf.
     uint256 private seq;
 
     // -- events --------------------------------------------------------------
     /// @dev Carries what a consumer dedups on — `checksum`, `dataPointer` — and who to
-    ///      attribute it to, so that needs no envelope decoding. `Anchored.caller` cannot
-    ///      stand in for `author`: it is always this contract.
+    ///      attribute it to, so that needs no envelope decoding. The precompile's `namespace`
+    ///      cannot stand in for `author`: it is always this contract.
     event RecordAdded(
         bytes32 indexed checksumHash,
         uint256 index,
@@ -97,6 +103,8 @@ contract Registry {
     error MissingRole(address account, bytes32 role);
     error LastAdmin();
     error Unauthorized();
+    /// A bare leaf leading with `record` or `status`, this contract's own kinds.
+    error ReservedKind();
 
     /// @notice Deployed by {RegistryFactory}, with its creator as the first admin.
     constructor(address admin, address factory_) {
@@ -107,16 +115,6 @@ contract Registry {
     }
 
     // -- keys ----------------------------------------------------------------
-    /// @notice The key a record stream is anchored under. No registry id: this contract is
-    ///         the registry, and `latest(address(this), key)` is already scoped to it.
-    function recordKey(bytes32 checksumHash) public pure returns (bytes32) {
-        return keccak256(abi.encode("record", checksumHash));
-    }
-
-    function statusKey(bytes32 checksumHash, uint256 index) public pure returns (bytes32) {
-        return keccak256(abi.encode("status", checksumHash, index));
-    }
-
     /// @notice Record-level role id, scoped by record stream. Registry-level roles need no
     ///         derivation — the role *is* the id — so there is no `registryRole`.
     function recordRole(bytes32 checksumHash, bytes32 role) public pure returns (bytes32) {
@@ -124,10 +122,10 @@ contract Registry {
     }
 
     // -- records -------------------------------------------------------------
-    /// @notice Appends a version to `checksum`, creating the stream on first use. Requires
-    ///         `admin` or `editor` at record or registry scope. The version `index` inside the
-    ///         anchored envelope makes every version's digest distinct, so re-anchoring
-    ///         identical content is a new version, never a no-op revert.
+    /// @notice Appends a version to `checksum`, creating the stream on first use, as one leaf
+    ///         committing to the record envelope. Requires `admin` or `editor` at record or
+    ///         registry scope. The version `index` inside the envelope makes every version's
+    ///         digest distinct, so re-adding identical content is a new version.
     /// @param  category    What the record attests to. Classification, not authorization.
     /// @param  dataPointer Identifies the data, where `checksum` identifies the bytes — the
     ///         pair tells the same data re-attested from different data. May be empty; that
@@ -147,29 +145,27 @@ contract Registry {
         _checkWriter(checksumHash);
         index = ++versionCount[checksumHash];
 
-        IAnchoring(ANCHORING_ADDRESS)
-            .anchorAndHash(
-                recordKey(checksumHash),
-                abi.encode(
-                    KIND_RECORD,
-                    checksumHash,
-                    index,
-                    uri,
-                    checksum,
-                    checksumAlgo,
-                    metadata,
-                    category,
-                    dataPointer,
-                    msg.sender,
-                    block.timestamp
-                )
-            );
+        _append(
+            abi.encode(
+                KIND_RECORD,
+                checksumHash,
+                index,
+                uri,
+                checksum,
+                checksumAlgo,
+                metadata,
+                category,
+                dataPointer,
+                msg.sender,
+                block.timestamp
+            )
+        );
         emit RecordAdded(checksumHash, index, checksum, category, dataPointer, msg.sender);
     }
 
-    /// @notice Anchors a status for one record version. Requires `admin` or `editor` at record
-    ///         or registry scope. Idempotent: the envelope carries a sequence number, so
-    ///         re-asserting the current status is a fresh anchor.
+    /// @notice Appends a status for one record version, as one leaf. Requires `admin` or
+    ///         `editor` at record or registry scope. Idempotent: the envelope carries a
+    ///         sequence number, so re-asserting the current status is a fresh leaf.
     function updateRecordStatus(string calldata checksum, uint256 index, string calldata status)
         external
     {
@@ -179,12 +175,54 @@ contract Registry {
         }
         _checkWriter(checksumHash);
 
-        IAnchoring(ANCHORING_ADDRESS)
-            .anchorAndHash(
-                statusKey(checksumHash, index),
-                abi.encode(KIND_STATUS, checksumHash, index, status, msg.sender, ++seq)
-            );
+        _append(abi.encode(KIND_STATUS, checksumHash, index, status, msg.sender, ++seq));
         emit RecordStatusUpdated(checksumHash, index, status);
+    }
+
+    /// @dev One leaf committing to `envelope`, which rides along as the leaf's metadata so the
+    ///      log carries the preimage: self-verifying, the commitment is its digest.
+    function _append(bytes memory envelope) private {
+        IAnchoring(ANCHORING_ADDRESS).appendLeaf(keccak256(envelope), envelope);
+    }
+
+    // -- leaves --------------------------------------------------------------
+    /// @notice The registry's MMR root, zero before the first leaf.
+    function mmrRoot() public view returns (bytes32) {
+        return IAnchoring(ANCHORING_ADDRESS).root(address(this));
+    }
+
+    /// @notice Appends one leaf whose commitment is the caller's to shape: a record that lives
+    ///         off-chain and proves against the root instead of being an envelope here.
+    ///         Requires `admin` or `editor` at registry scope. Arguments are the precompile's.
+    ///         A payload leading with `record` or `status` is refused: a reader takes the
+    ///         author and version inside those on this contract's word.
+    function appendLeaf(bytes32, bytes calldata metadata) external {
+        _checkRegistryWriter();
+        if (metadata.length >= 32) {
+            bytes32 kind = bytes32(metadata[:32]);
+            if (kind == KIND_RECORD || kind == KIND_STATUS) revert ReservedKind();
+        }
+        _forward();
+    }
+
+    /// @notice The bulk anchor: a batch as the roots of aligned perfect subtrees, in leaf order,
+    ///         one call however many rows. How a corpus loads, its rows staying off-chain.
+    ///         Requires `admin` or `editor` at registry scope. Arguments are the precompile's.
+    function appendLeaves(IAnchoring.Chunk[] calldata, bytes calldata) external {
+        _checkRegistryWriter();
+        _forward();
+    }
+
+    /// @dev The call as it came, made under this contract's address. The precompile's signature
+    ///      is this one's, so nothing is decoded to be encoded again, nothing comes back, and
+    ///      its refusal is returned as it was raised. A `call`, never `delegatecall`.
+    function _forward() private {
+        (bool ok, bytes memory out) = ANCHORING_ADDRESS.call(msg.data);
+        if (!ok) {
+            assembly ("memory-safe") {
+                revert(add(out, 32), mload(out))
+            }
+        }
     }
 
     // -- RBAC ----------------------------------------------------------------
@@ -243,16 +281,17 @@ contract Registry {
         return roleId != 0 && member[roleId][account];
     }
 
-    /// @notice The latest anchored digest for a record stream — verifiable against the
-    ///         envelope in the corresponding `Anchored` event.
-    function latestRecordDigest(bytes32 checksumHash) external view returns (bytes32) {
-        return IAnchoring(ANCHORING_ADDRESS).latest(address(this), recordKey(checksumHash));
-    }
-
     // -- internals -----------------------------------------------------------
     /// @dev The caller holds this registry's `admin` role.
     function _isRegistryAdmin() private view returns (bool) {
         return member[ROLE_ADMIN][msg.sender];
+    }
+
+    /// @dev `admin` or `editor` at registry scope: a leaf has no checksum for a record-scoped
+    ///      role to attach to.
+    function _checkRegistryWriter() private view {
+        if (_isRegistryAdmin() || member[ROLE_EDITOR][msg.sender]) return;
+        revert Unauthorized();
     }
 
     /// @dev `admin` or `editor`, registry scope first (the common case — every first version

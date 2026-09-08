@@ -60,6 +60,16 @@ contract RegistryTest is Test {
         return reg.addRecord("ipfs://a", checksum, "sha256", "{}", category, dataPointer);
     }
 
+    /// The last leaf `reg` appended: its commitment and the envelope it carried, as the
+    /// stand-in keeps them for the test's sake.
+    function lastLeaf(Registry reg)
+        internal
+        view
+        returns (bytes32 commitment, bytes memory envelope)
+    {
+        return MockAnchoring(ANCHORING_ADDRESS).lastLeaf(address(reg));
+    }
+
     // -- deployment ----------------------------------------------------------
     function test_deployRegistry_isPermissionless_andNamesMayRepeat() public {
         address a = deploy(creator, "docs");
@@ -95,13 +105,12 @@ contract RegistryTest is Test {
         factory.deployRegistry("", "", "");
     }
 
-    /// The whole point of the design: two registries are two namespaces in the precompile,
-    /// so nothing in the key or the payload has to keep them apart.
+    /// The whole point of the design: two registries are two MMRs in the precompile, so
+    /// nothing in the payload has to keep them apart.
     function test_registriesAreSeparateNamespacesInTheLog() public {
         Registry a = Registry(deploy(creator, "a"));
         Registry b = Registry(deploy(creator, "b"));
-        // The same checksum in both, so the same key -- it derives from the checksum and
-        // nothing else. Differing uris keep the two heads apart.
+        // The same checksum in both; differing uris keep the two leaves apart.
         vm.prank(creator);
         a.addRecord(
             "ipfs://in-a", "shared", "sha256", "{}", Registry.RecordCategory.Unspecified, ""
@@ -112,14 +121,11 @@ contract RegistryTest is Test {
         );
 
         IAnchoring anchoring = IAnchoring(ANCHORING_ADDRESS);
-        bytes32 hash = keccak256("shared");
-        bytes32 key = a.recordKey(hash);
-        assertEq(key, b.recordKey(hash), "the same key in both registries...");
-        assertEq(anchoring.latest(address(a), key), a.latestRecordDigest(hash));
-        assertEq(anchoring.latest(address(b), key), b.latestRecordDigest(hash));
+        assertEq(anchoring.root(address(a)), a.mmrRoot(), "the registry reads its own root...");
+        assertEq(anchoring.root(address(b)), b.mmrRoot());
         assertTrue(
-            anchoring.latest(address(a), key) != anchoring.latest(address(b), key),
-            "...holding their own heads, because the caller is the partition"
+            a.mmrRoot() != bytes32(0) && a.mmrRoot() != b.mmrRoot(),
+            "...and each holds its own, because the caller is the partition"
         );
     }
 
@@ -131,8 +137,8 @@ contract RegistryTest is Test {
         assertEq(checksumHash, keccak256("abc"), "the checksum hash is the identity");
         assertEq(index, 1);
 
-        // The head is the digest of the exact envelope the event carried. Category and pointer
-        // are inside it, so neither can be restated after the fact without a new anchor.
+        // The leaf commits to the digest of the exact envelope it carried. Category and pointer
+        // are inside it, so neither can be restated after the fact without a new leaf.
         bytes memory envelope = abi.encode(
             reg.KIND_RECORD(),
             checksumHash,
@@ -146,7 +152,9 @@ contract RegistryTest is Test {
             creator,
             block.timestamp
         );
-        assertEq(reg.latestRecordDigest(checksumHash), keccak256(envelope));
+        (bytes32 commitment, bytes memory carried) = lastLeaf(reg);
+        assertEq(commitment, keccak256(envelope), "self-verifying");
+        assertEq(carried, envelope, "the preimage is in the log");
     }
 
     /// A consumer deduping on `(author, dataPointer)` reads both from the log, not the envelope.
@@ -238,10 +246,9 @@ contract RegistryTest is Test {
         assertEq(reg.versionCount(keccak256("abc")), 0, "neither started a stream");
     }
 
-    /// The keys and tags every off-chain reader derives for itself, against the vectors the
-    /// decoder in `nvnmchain-anchoring` holds. Nothing else here notices them moving: the
-    /// namespace test compares two registries' derivations to each other, and the kind test
-    /// reads the tag out of an envelope this contract just wrote -- both follow a rename.
+    /// The tags and role ids every off-chain reader derives for itself, against the vectors the
+    /// decoder in `nvnmchain-anchoring` holds. Nothing else here notices them moving: the kind
+    /// test reads the tag out of an envelope this contract just wrote, and follows a rename.
     function test_theWireFormatIsWhatOffChainReadersDerive() public {
         Registry reg = Registry(deploy(creator, "docs"));
         // `keccak256("0xabc")`, the checksum those vectors were generated for.
@@ -255,33 +262,41 @@ contract RegistryTest is Test {
         );
 
         assertEq(
-            reg.recordKey(hash), 0x5de9cfc79de28bdb120140799229816d1be7b571e7dc8db35d3f24d2a35142a3
-        );
-        assertEq(
-            reg.statusKey(hash, 1),
-            0x40c526ce172b7720c74b54727866222688294b31844db86d18ec1075c5702c61
-        );
-        assertEq(
             reg.recordRole(hash, EDITOR),
             0xb09af46f64b6fcc046e2a1984e62b5693ebaa204c9d2a2a5227985b5bb238a4e
         );
     }
 
     function test_everyEnvelopeLeadsWithItsKind() public {
-        // An indexer classifies a payload from the log alone, without deriving keys first.
+        // An indexer classifies a leaf's payload from the log alone.
         Registry reg = Registry(deploy(creator, "docs"));
-        (bytes32 checksumHash, uint256 index) = addRecord(creator, reg, "abc");
+        (, uint256 index) = addRecord(creator, reg, "abc");
+        (, bytes memory envelope) = lastLeaf(reg);
+        assertEq(abi.decode(envelope, (bytes32)), reg.KIND_RECORD());
+
         vm.prank(creator);
         reg.updateRecordStatus("abc", index, "redacted");
+        (, envelope) = lastLeaf(reg);
+        assertEq(abi.decode(envelope, (bytes32)), reg.KIND_STATUS());
+    }
 
-        bytes32[2] memory keys = [reg.recordKey(checksumHash), reg.statusKey(checksumHash, index)];
+    /// A registry-scoped writer may append a bare leaf, but not one leading with this
+    /// contract's own kinds: a reader takes a record's author and version from the envelope.
+    function test_appendLeaf_refusesTheRegistrysOwnKinds() public {
+        Registry reg = Registry(deploy(creator, "docs"));
         bytes32[2] memory kinds = [reg.KIND_RECORD(), reg.KIND_STATUS()];
-
-        for (uint256 i; i < keys.length; i++) {
-            bytes memory envelope =
-                MockAnchoring(ANCHORING_ADDRESS).metadataOf(address(reg), keys[i]);
-            assertEq(abi.decode(envelope, (bytes32)), kinds[i]);
+        for (uint256 i; i < kinds.length; i++) {
+            bytes memory forged = abi.encode(kinds[i], keccak256("abc"));
+            vm.prank(creator);
+            vm.expectRevert(Registry.ReservedKind.selector);
+            reg.appendLeaf(keccak256(forged), forged);
         }
+
+        // Anything else is the writer's to shape, a payload shorter than a kind included.
+        vm.prank(creator);
+        reg.appendLeaf(keccak256("bare"), "bare");
+        (uint256 count,) = IAnchoring(ANCHORING_ADDRESS).state(address(reg));
+        assertEq(count, 1);
     }
 
     // -- RBAC ----------------------------------------------------------------
@@ -442,9 +457,8 @@ contract RegistryTest is Test {
         reg.revokeRole("", editor, EDITOR);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        bytes32 anchored = keccak256("Anchored(address,bytes32,bytes32,bytes)");
         for (uint256 i; i < logs.length; i++) {
-            assertTrue(logs[i].topics[0] != anchored, "no ACL change reaches the log");
+            assertTrue(logs[i].emitter != ANCHORING_ADDRESS, "no ACL change reaches the MMR");
         }
         assertFalse(reg.hasRole("", editor, EDITOR), "...but the state moved");
     }
@@ -473,21 +487,24 @@ contract RegistryTest is Test {
         Registry reg = Registry(deploy(creator, "docs"));
         (bytes32 checksumHash, uint256 index) = addRecord(creator, reg, "abc");
 
-        // Re-asserting the same status must not trip the precompile's no-op rule: the
-        // envelope's sequence number keeps every digest distinct.
+        // Re-asserting the same status is a distinct leaf: the envelope's sequence number
+        // keeps every digest distinct.
         vm.prank(creator);
         reg.updateRecordStatus("abc", index, "redacted");
         vm.prank(creator);
         reg.updateRecordStatus("abc", index, "redacted");
 
-        // Two status anchors so far, so this one carries sequence 2 — and the asserting
+        // Two status leaves so far, so this one carries sequence 2 — and the asserting
         // writer, without whom a status is an unattributable claim about someone's record.
+        (bytes32 commitment,) = lastLeaf(reg);
         assertEq(
-            IAnchoring(ANCHORING_ADDRESS).latest(address(reg), reg.statusKey(checksumHash, index)),
+            commitment,
             keccak256(
                 abi.encode(reg.KIND_STATUS(), checksumHash, index, "redacted", creator, uint256(2))
             )
         );
+        (uint256 count,) = IAnchoring(ANCHORING_ADDRESS).state(address(reg));
+        assertEq(count, 3, "one record and two statuses");
     }
 
     function test_updateRecordStatus_checksAuthAndExistence() public {

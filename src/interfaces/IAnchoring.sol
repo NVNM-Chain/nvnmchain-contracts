@@ -1,24 +1,58 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-/// @notice The anchoring precompile: an append-only, caller-partitioned commitment log.
-///         State is one word per (namespace, key) — the latest commitment; history and
-///         payloads live in the `Anchored` event log. Re-writing the stored commitment
-///         reverts `CommitmentUnchanged()`.
+/// @notice The anchoring precompile: one append-only Merkle Mountain Range per caller. State is
+///         the leaf count and one peak per height, so an append needs no witness; `metadata`
+///         is never stored, only emitted, and every event carries the peaks, so a proof needs
+///         the log and nothing else.
+///
+///         A leaf is `keccak256("leaf" ‖ commitment)`, a merge `keccak256("merge" ‖ left ‖ right)`,
+///         and the root bags the peaks highest first, `keccak256("bag" ‖ acc ‖ peak)`.
 interface IAnchoring {
-    /// @notice Anchors `commitment` under the caller's namespace at `key`.
-    ///         `metadata` is never stored, only emitted.
-    function anchor(bytes32 key, bytes32 commitment, bytes calldata metadata) external;
+    /// @notice Appends one leaf to the caller's MMR. Nothing comes back: the root is what the
+    ///         event's peaks bag to, or `root(namespace)`.
+    function appendLeaf(bytes32 commitment, bytes calldata metadata) external;
 
-    /// @notice Anchors `keccak256(metadata)`, making the emitted event self-verifying.
-    function anchorAndHash(bytes32 key, bytes calldata metadata) external;
+    /// @notice An aligned perfect subtree to append: its root and height.
+    struct Chunk {
+        bytes32 root;
+        uint8 height;
+    }
 
-    /// @notice The latest commitment for `(namespace, key)`, or zero if never anchored.
-    function latest(address namespace, bytes32 key) external view returns (bytes32 commitment);
+    /// @notice Appends a batch as the roots of aligned perfect subtrees, in leaf order: a chunk
+    ///         of height `h` merges only when the count is a multiple of `2^h`. An empty batch
+    ///         changes nothing.
+    function appendLeaves(Chunk[] calldata chunks, bytes calldata metadata) external;
 
-    event Anchored(address indexed caller, bytes32 indexed key, bytes32 commitment, bytes metadata);
+    /// @notice The root of `namespace`'s MMR, or zero if nothing was ever appended.
+    function root(address namespace) external view returns (bytes32);
 
-    error CommitmentUnchanged();
+    /// @notice The leaf count and the peaks, highest first — what a proof is checked against.
+    function state(address namespace) external view returns (uint256 count, bytes32[] memory peaks);
+
+    /// @notice One leaf landed at `index`.
+    event LeafAppended(
+        address indexed namespace,
+        uint256 indexed index,
+        bytes32 commitment,
+        bytes32[] peaks,
+        bytes metadata
+    );
+
+    /// @notice A batch landed from `firstLeaf`, bringing the leaf count to `count`.
+    event LeavesAppended(
+        address indexed namespace,
+        uint256 indexed firstLeaf,
+        uint256 count,
+        Chunk[] chunks,
+        bytes32[] peaks,
+        bytes metadata
+    );
+
+    /// @notice A chunk of `height` at `count`, which is not a multiple of its size.
+    error ChunkNotAligned(uint256 count, uint256 height);
+    /// @notice A zero chunk root, which nothing hashes to.
+    error ZeroChunkRoot();
 }
 
 /// @dev Fixed at genesis.
