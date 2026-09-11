@@ -2,56 +2,7 @@
 
 Application contracts for NVM. Economics (token, staking, fee split) live here as
 upgradeable contracts; the node reads them only through an opt-in consensus hook
-(`stakingElection` → `NVNMStaking.computeCommittee()`). The anchoring precompile
-is enshrined in the node; this repo talks to it through `IAnchoring`.
-
-## Registry + RegistryFactory
-
-One contract per registry: versioned checksum records with scoped role-based access control,
-deployed by a factory.
-
-The precompile at `0x…0a00` keeps one Merkle Mountain Range per caller, so a registry's own
-address is its MMR — `IAnchoring.root(registry)` is what a proof is checked against — and no
-mapping or envelope carries a registry id. A single contract fronting many registries would
-throw that partition away and rebuild it by hand.
-
-The contract appends rather than stores: every record version and status is one leaf,
-committing to an envelope the precompile logs, and only what authorization and version
-numbering need — counters and role membership — lives in contract storage. Each envelope leads
-with a `bytes32` kind (`record`, `status`), so an indexer classifies a leaf's payload from the
-log alone. Envelopes stay distinct per version — the version `index`, and a sequence number for
-status — so re-adding identical content is a distinct leaf.
-
-Role changes are **not** anchored. Membership is the registry's state, read with `hasRole`,
-and history is its own `RoleGranted`/`RoleRevoked`, which carry every field. A third copy in
-the anchored log would only be something to drift.
-
-Roles are registry-scoped (the whole contract, needing no derivation — the role is its own id)
-or record-scoped (one checksum within it), over `admin` and `editor`. The owner (a Safe) is the
-break-glass admin: it may grant a registry `admin` without holding one, which is what keeps the
-"last admin cannot be revoked" rule recoverable.
-
-The MMR's count and peaks are the precompile's state — a peak that merges away is left in
-its slot, so a height pays state creation once — so a write carries no witness and several may
-share a transaction. That keeps the arithmetic, and its bytecode, out of a contract deployed
-once per registry: `appendLeaf` and `appendLeaves` forward the call as it came, once the
-caller's role is checked, and their arguments are the precompile's. `appendLeaf` refuses a
-payload leading with `record` or `status`, the contract's own kinds. `appendLeaves` is the bulk
-anchor — a batch as the roots of aligned perfect subtrees, one call per registry, its rows
-staying off-chain — which is how a corpus loads. A row proves against the root with `log n`
-siblings through `MMRVerifier`, deployed once, with the peaks the event or `IAnchoring.state`
-reports; `MMR.sol` is the same arithmetic in Solidity, for the verifier and the test stand-in.
-
-A chunk is a subtree root, so `appendLeaves` cannot refuse what a leaf under it says: a
-registry-scoped writer can put any leaf hash into the tree, a forged `record` envelope's
-included, and later prove it there. Only an envelope that appears in a `LeafAppended` log is
-the contract's word; a proof alone attributes nothing to the registry.
-
-Registries are immutable: upgrading means deploying a new one and re-granting its roles.
-What a registry anchors is a commitment, provable under the address that wrote it forever, so
-a replacement splits the history across two addresses rather than invalidating any of it.
-Registry name, description and metadata ride in `RegistryDeployed` rather than an anchor:
-descriptive, set once, nothing to prove.
+(`stakingElection` → `NVNMStaking.computeCommittee()`).
 
 ## Staking and fees
 
@@ -99,18 +50,10 @@ collapsing into one.
 
 ## Layout
 
-- `src/Registry.sol` — one registry, deployed outright and immutable
-- `src/RegistryFactory.sol` — deploys one Registry per registry, outright
-- `src/interfaces/IAnchoring.sol` — the precompile's interface and address
-- `src/MMR.sol`, `src/MMRVerifier.sol` — the MMR's arithmetic, and inclusion proofs against any
-  root, deployed once
 - `src/NVNMStaking.sol` — delegated staking and committee election
 - `src/FeeRouter.sol` — per-validator fee splitter and factory
 - `src/GuardedSwapper.sol` — guarded buyback swapper
 - `src/BridgedNVNM.sol` — bridged NVNM ERC-20
-- `test/support/MockAnchoring.sol` — a stand-in for the precompile, etched at its address so
-  tests run in a plain forge EVM
-- `test/support/RegistryDeployer.sol` — one-shot factory deploy, for local and e2e use
 - `test/support/StakingDeployer.sol` — one-shot staking + mock tokens, for local and e2e use
 - `test/support/MockERC20.sol`, `test/support/MockSwapPool.sol` — a plain token and a
   fixed-rate market, for the fee and buyback tests
@@ -122,6 +65,5 @@ forge build
 forge test
 ```
 
-The precompile itself lives in the node repo (`crates/precompiles/src/anchoring/`); this repo
-depends on it only through `IAnchoring`. The epoch-feed hook lives in the node
-(`crates/consensus`); leave `stakingElection` unset for PoA.
+The epoch-feed hook lives in the node (`crates/consensus`); leave `stakingElection` unset for
+PoA.
