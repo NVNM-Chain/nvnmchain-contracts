@@ -1,25 +1,19 @@
 [profile.default]
-# Pinned so the bytecode vendored into tempo-e2e is reproducible across machines.
-solc = "0.8.28"
-evm_version = "cancun"
+solc = "0.8.28" # pinned, so layout/anchoring.bin is reproducible
 src = "src"
 out = "out"
 test = "test"
 libs = ["lib"]
-via-ir = true
 optimizer = true
-# The impl deploys once behind a proxy and is called for the life of the system —
-# tune for runtime gas, not deploy size.
-optimizer_runs = 10_000
+optimizer_runs = 200
+# On every build, or `forge inspect storage-layout` can hit a cached artifact without it.
 extra_output = ["storageLayout"]
+# No metadata hash, so a comment edit cannot change anchoring.bin.
+bytecode_hash = "none"
+# test/SeedFixture.t.sol writes layout/seed-fixture.json.
+fs_permissions = [{ access = "read-write", path = "./layout" }]
 # solady/forge-std pinned as git submodules (same commits as tips/verify/lib).
 remappings = [
     "solady/=lib/solady/src/",
     "forge-std/=lib/forge-std/src/",
 ]
-
-[fmt]
-line_length = 100
-sort_imports = true
-bracket_spacing = true
-number_underscore = "thousands"
