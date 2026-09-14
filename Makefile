@@ -3,7 +3,8 @@
 test:
 	forge test
 
-# layout/ is read by the chain's dump writer and Tempo's genesis; commit it after a contract change.
+# layout/ is read by the chain's dump writer, Tempo's genesis and the explorer's decoder;
+# commit it after a contract change.
 # AST ids are stripped from the layout, since unrelated edits move them.
 layout:
 	@mkdir -p layout
@@ -14,6 +15,7 @@ import re;\
 ids=lambda s: re.sub(r"\)[0-9]+_storage", ")_storage", s);\
 strip=lambda o: [strip(v) for v in o] if isinstance(o,list) else ({ids(k):strip(v) for k,v in o.items() if k!="astId"} if isinstance(o,dict) else (ids(o) if isinstance(o,str) else o));\
 print(json.dumps(strip(d), indent=2, sort_keys=True))' > layout/anchoring.json
+	@forge inspect Anchoring abi --json > layout/anchoring.abi.json
 	@forge test --match-path 'test/SeedFixture.t.sol' >/dev/null
 	@forge inspect Anchoring deployedBytecode > layout/anchoring.bin
 

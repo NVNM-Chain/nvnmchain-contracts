@@ -1,0 +1,772 @@
+[
+  {
+    "type": "constructor",
+    "inputs": [
+      {
+        "name": "moduleAdmin",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "addRecord",
+    "inputs": [
+      {
+        "name": "record",
+        "type": "tuple",
+        "internalType": "struct IAnchoring.Record",
+        "components": [
+          {
+            "name": "uri",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "checksum",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "checksumAlgo",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "metadata",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "timestamp",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "status",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "recordId",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "index",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "isLatest",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "registryId",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "recordId",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "addRegistry",
+    "inputs": [
+      {
+        "name": "name",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "description",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "metadata",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "internalType": "uint64"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "getRoleAdmin",
+    "inputs": [
+      {
+        "name": "role",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "grantRole",
+    "inputs": [
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "checksum",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "role",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "hasRole",
+    "inputs": [
+      {
+        "name": "role",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "bool",
+        "internalType": "bool"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "records",
+    "inputs": [
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "checksum",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "recordId",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "index",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "pagination",
+        "type": "tuple",
+        "internalType": "struct IAnchoring.PageRequest",
+        "components": [
+          {
+            "name": "key",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "offset",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "limit",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "countTotal",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "reverse",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "recordsOut",
+        "type": "tuple[]",
+        "internalType": "struct IAnchoring.Record[]",
+        "components": [
+          {
+            "name": "uri",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "checksum",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "checksumAlgo",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "metadata",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "timestamp",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "status",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "recordId",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "index",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "isLatest",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "registryId",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      },
+      {
+        "name": "paginationOut",
+        "type": "tuple",
+        "internalType": "struct IAnchoring.PageResponse",
+        "components": [
+          {
+            "name": "nextKey",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "total",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "registries",
+    "inputs": [
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "pagination",
+        "type": "tuple",
+        "internalType": "struct IAnchoring.PageRequest",
+        "components": [
+          {
+            "name": "key",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "offset",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "limit",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "countTotal",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "reverse",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "registriesOut",
+        "type": "tuple[]",
+        "internalType": "struct IAnchoring.Registry[]",
+        "components": [
+          {
+            "name": "id",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "name",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "description",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "creator",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "createdAt",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "metadata",
+            "type": "string",
+            "internalType": "string"
+          }
+        ]
+      },
+      {
+        "name": "paginationOut",
+        "type": "tuple",
+        "internalType": "struct IAnchoring.PageResponse",
+        "components": [
+          {
+            "name": "nextKey",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "total",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "registriesByName",
+    "inputs": [
+      {
+        "name": "name",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "matchMode",
+        "type": "uint8",
+        "internalType": "uint8"
+      },
+      {
+        "name": "pagination",
+        "type": "tuple",
+        "internalType": "struct IAnchoring.PageRequest",
+        "components": [
+          {
+            "name": "key",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "offset",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "limit",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "countTotal",
+            "type": "bool",
+            "internalType": "bool"
+          },
+          {
+            "name": "reverse",
+            "type": "bool",
+            "internalType": "bool"
+          }
+        ]
+      }
+    ],
+    "outputs": [
+      {
+        "name": "registriesOut",
+        "type": "tuple[]",
+        "internalType": "struct IAnchoring.Registry[]",
+        "components": [
+          {
+            "name": "id",
+            "type": "uint64",
+            "internalType": "uint64"
+          },
+          {
+            "name": "name",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "description",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "creator",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "createdAt",
+            "type": "string",
+            "internalType": "string"
+          },
+          {
+            "name": "metadata",
+            "type": "string",
+            "internalType": "string"
+          }
+        ]
+      },
+      {
+        "name": "paginationOut",
+        "type": "tuple",
+        "internalType": "struct IAnchoring.PageResponse",
+        "components": [
+          {
+            "name": "nextKey",
+            "type": "bytes",
+            "internalType": "bytes"
+          },
+          {
+            "name": "total",
+            "type": "uint64",
+            "internalType": "uint64"
+          }
+        ]
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "revokeRole",
+    "inputs": [
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "checksum",
+        "type": "string",
+        "internalType": "string"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "internalType": "address"
+      },
+      {
+        "name": "role",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "roleMemberCount",
+    "inputs": [
+      {
+        "name": "role",
+        "type": "bytes32",
+        "internalType": "bytes32"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "updateRecordStatus",
+    "inputs": [
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "recordId",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "index",
+        "type": "uint64",
+        "internalType": "uint64"
+      },
+      {
+        "name": "status",
+        "type": "string",
+        "internalType": "string"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "event",
+    "name": "AddRecord",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "recordId",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "index",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "checksum",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "AddRegistry",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "name",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "GrantRole",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "checksum",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "role",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "RevokeRole",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "checksum",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": false,
+        "internalType": "address"
+      },
+      {
+        "name": "role",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "UpdateRecordStatus",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "indexed": true,
+        "internalType": "address"
+      },
+      {
+        "name": "registryId",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "recordId",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "index",
+        "type": "uint64",
+        "indexed": false,
+        "internalType": "uint64"
+      },
+      {
+        "name": "status",
+        "type": "string",
+        "indexed": false,
+        "internalType": "string"
+      }
+    ],
+    "anonymous": false
+  }
+]
