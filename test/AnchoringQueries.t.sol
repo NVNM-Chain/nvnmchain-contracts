@@ -252,6 +252,25 @@ contract AnchoringQueriesTest is AnchoringFixture {
         assertEq(paged[0].id, b);
     }
 
+    /// The node's index folded every name, so a spelling that matched there matches here.
+    function test_an_exact_name_folds_ascii_case() public {
+        uint64 mixed = _named("CCV-Name-Index");
+        uint64 lower = _named("ccv-name-index");
+        (IAnchoring.Registry[] memory got,) = anchoring.registriesByName("CCV-NAME-INDEX", 1, _page(0, 0));
+        assertEq(got.length, 2);
+        assertEq(got[0].id, mixed);
+        assertEq(got[1].id, lower);
+        assertEq(got[0].name, "CCV-Name-Index", "the name is stored as written");
+
+        // Only ASCII folds: a capital from another script is matched as written.
+        uint64 accented = _named(unicode"Éclair");
+        (IAnchoring.Registry[] memory exact,) = anchoring.registriesByName(unicode"Éclair", 1, _page(0, 0));
+        assertEq(exact.length, 1);
+        assertEq(exact[0].id, accented);
+        (IAnchoring.Registry[] memory folded,) = anchoring.registriesByName(unicode"éclair", 1, _page(0, 0));
+        assertEq(folded.length, 0);
+    }
+
     function test_an_unknown_name_is_empty_rather_than_an_error() public {
         _named("us-ca1");
         (IAnchoring.Registry[] memory got,) = anchoring.registriesByName("nope", 0, _page(0, 0));

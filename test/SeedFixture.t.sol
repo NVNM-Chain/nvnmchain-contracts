@@ -19,7 +19,7 @@ contract SeedFixtureTest is Test {
     string internal constant OUT = "layout/seed-fixture.json";
 
     /// Chosen for what a writer gets wrong: a uri on each side of 32 bytes, a second version,
-    /// one checksum in two registries, a duplicate name, and empty strings.
+    /// one checksum in two registries, a duplicate name in another case, and empty strings.
     function test_write_the_seed_fixture() public {
         anchoring = new Anchoring(MODULE_ADMIN);
         vm.warp(AT);
@@ -43,9 +43,9 @@ contract SeedFixtureTest is Test {
         vm.prank(BOB, BOB);
         anchoring.addRecord(_record(second, "1 C.C.A. 144", "https://ex.test/o"));
 
-        // A duplicate name, empty description and metadata, and no records.
+        // A duplicate name in another case, empty description and metadata, and no records.
         vm.prank(ALICE, ALICE);
-        anchoring.addRegistry("us-ca1", "", "");
+        anchoring.addRegistry("US-CA1", "", "");
 
         vm.prank(ALICE, ALICE);
         anchoring.grantRole(first, "", BOB, "editor");

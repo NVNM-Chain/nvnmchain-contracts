@@ -77,6 +77,7 @@ interface IAnchoring {
 
     /// @notice Exact match only: `matchMode` 0 or 1. Prefix (2), suffix (3) and contains (4)
     ///         were a node-local index; on chain they revert and stay an off-chain search.
+    ///         The match folds ASCII case, as that index folded every name.
     function registriesByName(string calldata name, uint8 matchMode, PageRequest calldata pagination)
         external
         view

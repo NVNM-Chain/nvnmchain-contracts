@@ -5,9 +5,9 @@ Application contracts for NVM.
 ## Anchoring
 
 `x/anchoring`'s precompile as a contract with the same ABI, at the same address on Tempo
-(`0x…0a00`), so a caller changes chains and nothing else. It differs in three ways:
-`registriesByName` answers exact match only, the timestamps it writes have no sub-second part,
-and revert strings that format values are shorter.
+(`0x…0a00`), so a caller changes chains and nothing else. Four differences: `registriesByName`
+matches exactly, folding ASCII case; timestamps have no sub-second part; revert strings that
+format values are shorter; a call carrying value reverts with no reason.
 
 The corpus arrives through the chain repo's dump writer (`x/anchoring/evmlayout`), not
 transactions, so `layout/` is an interface: the slot layout, the slots the contract writes for

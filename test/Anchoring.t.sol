@@ -322,6 +322,11 @@ contract AnchoringTest is AnchoringFixture {
         _as(alice);
         vm.expectRevert("role cannot be empty");
         anchoring.revokeRole(id, "", bob, "");
+
+        // On revoke the precompile names the role before anything else.
+        _as(alice);
+        vm.expectRevert("role cannot be empty");
+        anchoring.revokeRole(0, "", bob, "");
     }
 
     function test_a_status_update_is_validated_in_the_modules_order() public {

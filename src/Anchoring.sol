@@ -10,10 +10,10 @@ import {Roles} from "./Roles.sol";
 /// @title Anchoring
 /// @notice x/anchoring with its state in EVM storage: the precompile's methods, selectors and
 ///         events, over the whole `Record`.
-/// @dev Each method names the keeper function it ports. A caller can see three differences:
-///      `registriesByName` answers exact match only, timestamps have no sub-second part, and
-///      revert strings that format values are shorter. The storage layout is the migration's
-///      interface; `test/StorageLayout.t.sol` pins it.
+/// @dev Each method names the keeper function it ports. A caller sees four differences: exact
+///      name match folding ASCII case, timestamps with no sub-second part, shorter revert
+///      strings where one formats a value, and no reason at all on a call carrying value.
+///      The storage layout is the migration's interface; `test/StorageLayout.t.sol` pins it.
 contract Anchoring is IAnchoring, AnchoringRBAC {
     string internal constant HRP = "nvnm"; // the bech32 prefix of `Registry.creator`
 
@@ -52,7 +52,8 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// scanned, so it is a list, ascending as the scan returns it.
     mapping(string => uint64[]) internal _registriesByChecksum;
 
-    /// The exact-match name index. Names are not unique, hence a list.
+    /// The exact-match name index, keyed by `_lower(name)` as the node's index keyed it.
+    /// Names are not unique, hence a list.
     mapping(string => uint64[]) internal _registriesByName;
 
     constructor(address moduleAdmin) {
@@ -86,7 +87,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         _setRoleAdmin(adminRole, adminRole);
         _grantRoleUnchecked(adminRole, msg.sender);
 
-        _registriesByName[name].push(registryId);
+        _registriesByName[_lower(name)].push(registryId);
         _registryCount = registryId;
 
         emit AddRegistry(msg.sender, registryId, name);
@@ -178,6 +179,8 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// @dev `msgServer.RevokeRole`, with its checks in the module's order.
     function revokeRole(uint64 registryId, string calldata checksum, address account, string calldata role) external {
         _ensureEoaCaller();
+        // The precompile checks the role before `ValidateBasic`, so a caller sees it first.
+        require(bytes(role).length != 0, "role cannot be empty");
         _validateRoleRequest(registryId, checksum, role);
         bool recordScoped = _ensureRoleScopeExists(registryId, checksum);
 
@@ -296,7 +299,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         require(bytes(name).length != 0, "name must be provided");
 
         (uint64 offset, uint64 limit) = _page(pagination);
-        uint64[] storage ids = _registriesByName[name];
+        uint64[] storage ids = _registriesByName[_lower(name)];
         uint256 n = _window(ids.length, offset, limit);
 
         registriesOut = new Registry[](n);
@@ -400,6 +403,17 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
 
     function _isAdmin(string calldata role) private pure returns (bool) {
         return keccak256(bytes(role)) == keccak256(bytes(Roles.ADMIN));
+    }
+
+    /// Folds `A`-`Z` and leaves every other byte. The node used Go's `strings.ToLower`, which
+    /// folds Unicode, so a capital from another script is the one spelling that differs.
+    function _lower(string calldata s) private pure returns (string memory) {
+        bytes memory b = bytes(s);
+        for (uint256 i = 0; i < b.length; i++) {
+            uint8 c = uint8(b[i]);
+            if (c >= 0x41 && c <= 0x5a) b[i] = bytes1(c + 32);
+        }
+        return string(b);
     }
 
     // ---- paging ----
