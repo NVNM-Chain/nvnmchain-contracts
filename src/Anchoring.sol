@@ -156,9 +156,10 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
 
     /// @inheritdoc IAnchoring
     /// @dev `msgServer.GrantRole`. A checksum scopes the role to that record; either way the
-    ///      registry's admin role administers it.
+    ///      registry's admin role administers it. The module admin skips the EOA gate: on the old
+    ///      chain it granted through `MsgGrantRole`, which had none, and here it is a contract.
     function grantRole(uint64 registryId, string calldata checksum, address account, string calldata role) external {
-        _ensureEoaCaller();
+        if (msg.sender != _moduleAdmin) _ensureEoaCaller();
         _validateRoleRequest(registryId, checksum, role);
         bool recordScoped = _ensureRoleScopeExists(registryId, checksum);
 
