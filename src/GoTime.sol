@@ -5,37 +5,36 @@ pragma solidity ^0.8.28;
 /// @notice A block time as the module prints it with `ctx.BlockTime().String()`:
 ///         `2025-09-09 00:00:00 +0000 UTC`.
 /// @dev Always UTC and whole seconds: `block.timestamp` has no fraction, and Go prints a whole
-///      second without one.
+///      second without one. Assembly, since every write stamps a row.
 library GoTime {
     /// The last second with a four-digit year.
     uint256 internal constant MAX = 253402300799;
 
-    function format(uint256 unixSeconds) internal pure returns (string memory) {
+    function format(uint256 unixSeconds) internal pure returns (string memory out) {
         // A fifth year digit would not fit the 29 bytes; fail loudly instead of truncating.
         require(unixSeconds <= MAX, "GoTime: year out of range");
 
         (uint256 y, uint256 m, uint256 d) = _civil(unixSeconds / 86400);
         uint256 rem = unixSeconds % 86400;
 
-        bytes memory out = new bytes(29);
-        _digits(out, 0, y, 4);
-        out[4] = "-";
-        _digits(out, 5, m, 2);
-        out[7] = "-";
-        _digits(out, 8, d, 2);
-        out[10] = " ";
-        _digits(out, 11, rem / 3600, 2);
-        out[13] = ":";
-        _digits(out, 14, (rem / 60) % 60, 2);
-        out[16] = ":";
-        _digits(out, 17, rem % 60, 2);
-
-        // The UTC offset, then the zone's name.
-        bytes memory zone = " +0000 UTC";
-        for (uint256 i = 0; i < zone.length; i++) {
-            out[19 + i] = zone[i];
+        // The 29 bytes are one word: a template, each pair of digits or'ed into its zeroes.
+        assembly ("memory-safe") {
+            function two(w, at, v) -> r {
+                r := or(w, or(shl(mul(8, sub(31, at)), div(v, 10)), shl(mul(8, sub(30, at)), mod(v, 10))))
+            }
+            let w := "0000-00-00 00:00:00 +0000 UTC"
+            w := two(w, 0, div(y, 100))
+            w := two(w, 2, mod(y, 100))
+            w := two(w, 5, m)
+            w := two(w, 8, d)
+            w := two(w, 11, div(rem, 3600))
+            w := two(w, 14, mod(div(rem, 60), 60))
+            w := two(w, 17, mod(rem, 60))
+            out := mload(0x40)
+            mstore(out, 29)
+            mstore(add(out, 32), w)
+            mstore(0x40, add(out, 64))
         }
-        return string(out);
     }
 
     /// Howard Hinnant's `civil_from_days`: the date `daysSinceEpoch` days after 1970-01-01.
@@ -49,13 +48,5 @@ library GoTime {
         d = doy - (153 * mp + 2) / 5 + 1;
         m = mp < 10 ? mp + 3 : mp - 9;
         y = yoe + era * 400 + (m <= 2 ? 1 : 0);
-    }
-
-    /// `value` in `width` zero-padded digits.
-    function _digits(bytes memory out, uint256 at, uint256 value, uint256 width) private pure {
-        for (uint256 i = width; i > 0; i--) {
-            out[at + i - 1] = bytes1(uint8(48 + (value % 10)));
-            value /= 10;
-        }
     }
 }

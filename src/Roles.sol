@@ -5,7 +5,7 @@ pragma solidity ^0.8.28;
 /// @notice The role ids `x/anchoring/rbac` uses: keccak of the string the keeper formats, so a
 ///         migrated grant keeps its `bytes32`.
 /// @dev `%d` is plain decimal. `%x` hex-encodes the checksum and role, so a colon in either
-///      cannot read as a separator.
+///      cannot read as a separator. Both are assembly, since every write derives a role.
 library Roles {
     string internal constant ADMIN = "admin";
     string internal constant EDITOR = "editor";
@@ -41,32 +41,40 @@ library Roles {
     }
 
     /// Go's `%d`, so zero is "0".
-    function _decimal(uint64 value) private pure returns (string memory) {
-        if (value == 0) return "0";
-        uint256 width;
-        for (uint64 v = value; v != 0; v /= 10) {
-            width++;
+    function _decimal(uint64 value) private pure returns (string memory out) {
+        assembly ("memory-safe") {
+            let width := 1
+            for { let v := div(value, 10) } v { v := div(v, 10) } { width := add(width, 1) }
+            out := mload(0x40)
+            mstore(out, width)
+            let p := add(add(out, 32), width)
+            for { let v := value } 1 {} {
+                p := sub(p, 1)
+                mstore8(p, add(48, mod(v, 10)))
+                v := div(v, 10)
+                if iszero(v) { break }
+            }
+            mstore(0x40, add(out, 64))
         }
-        bytes memory out = new bytes(width);
-        for (uint256 i = width; i > 0; i--) {
-            out[i - 1] = bytes1(uint8(48 + (value % 10)));
-            value /= 10;
-        }
-        return string(out);
     }
 
     /// Go's `%x` over a string: two lowercase hex digits a byte.
-    function _hex(string memory s) private pure returns (string memory) {
-        bytes memory b = bytes(s);
-        bytes memory out = new bytes(b.length * 2);
-        for (uint256 i = 0; i < b.length; i++) {
-            out[2 * i] = _nibble(uint8(b[i]) >> 4);
-            out[2 * i + 1] = _nibble(uint8(b[i]) & 0x0f);
+    function _hex(string memory s) private pure returns (string memory out) {
+        assembly ("memory-safe") {
+            let digits := "0123456789abcdef"
+            let len := mload(s)
+            let total := mul(len, 2)
+            out := mload(0x40)
+            mstore(out, total)
+            let src := add(s, 32)
+            let dst := add(out, 32)
+            for { let i := 0 } lt(i, len) { i := add(i, 1) } {
+                let b := byte(0, mload(add(src, i)))
+                mstore8(dst, byte(shr(4, b), digits))
+                mstore8(add(dst, 1), byte(and(b, 0x0f), digits))
+                dst := add(dst, 2)
+            }
+            mstore(0x40, add(add(out, 32), and(add(total, 31), not(31))))
         }
-        return string(out);
-    }
-
-    function _nibble(uint8 v) private pure returns (bytes1) {
-        return bytes1(v < 10 ? 48 + v : 87 + v);
     }
 }
