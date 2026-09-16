@@ -65,6 +65,30 @@ contract RolesTest is Test {
         assertTrue(Roles.forRegistry(registryId, Roles.ADMIN) != Roles.forRecord(registryId, checksum, Roles.ADMIN));
     }
 
+    /// The hex and decimal are assembly; the cheatcodes print Go's `%x` and `%d` independently.
+    function testFuzz_the_formatting_matches_the_cheatcodes(
+        uint64 registryId,
+        string calldata checksum,
+        string calldata role
+    ) public pure {
+        string memory id = vm.toString(registryId);
+        assertEq(Roles.forRegistry(registryId, role), keccak256(abi.encodePacked("registry:", id, ":", role)));
+        assertEq(
+            Roles.forRecord(registryId, checksum, role),
+            keccak256(abi.encodePacked("record:", id, ":", _hex(checksum), ":", _hex(role)))
+        );
+    }
+
+    /// `vm.toString(bytes)` is `0x`-prefixed; Go's `%x` is not.
+    function _hex(string memory s) private pure returns (string memory) {
+        bytes memory prefixed = bytes(vm.toString(bytes(s)));
+        bytes memory out = new bytes(prefixed.length - 2);
+        for (uint256 i = 0; i < out.length; i++) {
+            out[i] = prefixed[i + 2];
+        }
+        return string(out);
+    }
+
     /// The pair forms spell the role names in hex by hand; this ties them to the singular forms.
     function testFuzz_the_pair_forms_agree_with_the_singular_ones(uint64 registryId, string calldata checksum)
         public

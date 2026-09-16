@@ -3,71 +3,61 @@ pragma solidity ^0.8.28;
 
 /// @title Bech32
 /// @notice An address as the module writes `Registry.creator`: `sender.String()`, i.e. `nvnm1…`.
+/// @dev Assembly, since every `addRegistry` encodes a creator.
 library Bech32 {
-    /// 32 characters, so it fits a word and a lookup is an index, not a memory copy.
-    bytes32 internal constant CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-
     /// @notice `data` in bech32 under `hrp`, checksum included.
-    function encode(string memory hrp, bytes20 data) internal pure returns (string memory) {
-        // 160 bits is exactly 32 five-bit groups, so nothing is padded.
-        uint8[] memory five = new uint8[](32);
-        uint256 acc;
-        uint256 bits;
-        uint256 at;
-        for (uint256 i = 0; i < 20; i++) {
-            acc = (acc << 8) | uint8(data[i]);
-            bits += 8;
-            while (bits >= 5) {
-                bits -= 5;
-                five[at++] = uint8((acc >> bits) & 31);
+    function encode(string memory hrp, bytes20 data) internal pure returns (string memory out) {
+        assembly ("memory-safe") {
+            // BIP-173's polymod, one five-bit value at a time.
+            function step(chk, value) -> next {
+                let top := shr(25, chk)
+                next := xor(shl(5, and(chk, 0x1ffffff)), value)
+                next := xor(next, mul(0x3b6a57b2, and(top, 1)))
+                next := xor(next, mul(0x26508e6d, and(shr(1, top), 1)))
+                next := xor(next, mul(0x1ea119fa, and(shr(2, top), 1)))
+                next := xor(next, mul(0x3d4233dd, and(shr(3, top), 1)))
+                next := xor(next, mul(0x2a1462b3, and(shr(4, top), 1)))
             }
-        }
 
-        uint256 chk = _checksum(hrp, five);
-        bytes memory hrpBytes = bytes(hrp);
-        bytes memory out = new bytes(hrpBytes.length + 1 + 32 + 6);
-        uint256 w;
-        for (uint256 i = 0; i < hrpBytes.length; i++) {
-            out[w++] = hrpBytes[i];
-        }
-        out[w++] = "1";
-        for (uint256 i = 0; i < 32; i++) {
-            out[w++] = CHARSET[five[i]];
-        }
-        for (uint256 i = 0; i < 6; i++) {
-            out[w++] = CHARSET[(chk >> (5 * (5 - i))) & 31];
-        }
-        return string(out);
-    }
+            let charset := "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+            let len := mload(hrp)
+            let total := add(len, 39) // hrp, "1", 32 data characters, 6 checksum characters
+            let src := add(hrp, 32)
+            out := mload(0x40)
+            mstore(out, total)
+            let dst := add(out, 32)
 
-    /// BIP-173's checksum over the expanded hrp, the payload and six zeroes.
-    function _checksum(string memory hrp, uint8[] memory five) private pure returns (uint256) {
-        bytes memory h = bytes(hrp);
-        uint256 chk = 1;
-        for (uint256 i = 0; i < h.length; i++) {
-            chk = _step(chk, uint8(h[i]) >> 5);
-        }
-        chk = _step(chk, 0);
-        for (uint256 i = 0; i < h.length; i++) {
-            chk = _step(chk, uint8(h[i]) & 31);
-        }
-        for (uint256 i = 0; i < five.length; i++) {
-            chk = _step(chk, five[i]);
-        }
-        for (uint256 i = 0; i < 6; i++) {
-            chk = _step(chk, 0);
-        }
-        return chk ^ 1;
-    }
+            // The checksum opens over the hrp expanded: its high bits, a zero, its low bits.
+            let chk := 1
+            for { let i := 0 } lt(i, len) { i := add(i, 1) } {
+                let c := byte(0, mload(add(src, i)))
+                mstore8(add(dst, i), c)
+                chk := step(chk, shr(5, c))
+            }
+            chk := step(chk, 0)
+            for { let i := 0 } lt(i, len) { i := add(i, 1) } {
+                chk := step(chk, and(byte(0, mload(add(src, i))), 31))
+            }
+            dst := add(dst, len)
+            mstore8(dst, 0x31) // "1"
+            dst := add(dst, 1)
 
-    function _step(uint256 chk, uint256 value) private pure returns (uint256) {
-        uint256 top = chk >> 25;
-        chk = ((chk & 0x1ffffff) << 5) ^ value;
-        if (top & 1 != 0) chk ^= 0x3b6a57b2;
-        if (top & 2 != 0) chk ^= 0x26508e6d;
-        if (top & 4 != 0) chk ^= 0x1ea119fa;
-        if (top & 8 != 0) chk ^= 0x3d4233dd;
-        if (top & 16 != 0) chk ^= 0x2a1462b3;
-        return chk;
+            // 160 bits is exactly 32 five-bit groups, read off the top of the word.
+            let bits := shr(96, data)
+            for { let i := 0 } lt(i, 32) { i := add(i, 1) } {
+                let group := and(shr(sub(155, mul(5, i)), bits), 31)
+                chk := step(chk, group)
+                mstore8(add(dst, i), byte(group, charset))
+            }
+            dst := add(dst, 32)
+
+            // Six zeroes close the polymod; the checksum is its 30 bits, xor 1, six characters.
+            for { let i := 0 } lt(i, 6) { i := add(i, 1) } { chk := step(chk, 0) }
+            chk := xor(chk, 1)
+            for { let i := 0 } lt(i, 6) { i := add(i, 1) } {
+                mstore8(add(dst, i), byte(and(shr(mul(5, sub(5, i)), chk), 31), charset))
+            }
+            mstore(0x40, add(add(out, 32), and(add(total, 31), not(31))))
+        }
     }
 }

@@ -159,7 +159,8 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     ///      registry's admin role administers it. The module admin skips the EOA gate: on the old
     ///      chain it granted through `MsgGrantRole`, which had none, and here it is a contract.
     function grantRole(uint64 registryId, string calldata checksum, address account, string calldata role) external {
-        if (msg.sender != _moduleAdmin) _ensureEoaCaller();
+        bool moduleAdmin = msg.sender == _moduleAdmin;
+        if (!moduleAdmin) _ensureEoaCaller();
         _validateRoleRequest(registryId, checksum, role);
         bool recordScoped = _ensureRoleScopeExists(registryId, checksum);
 
@@ -167,7 +168,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         _setRoleAdmin(role_, Roles.forRegistry(registryId, Roles.ADMIN));
 
         // Break-glass: the module admin may seed a registry admin, and nothing else.
-        if (!recordScoped && _isAdmin(role) && msg.sender == _moduleAdmin) {
+        if (!recordScoped && _isAdmin(role) && moduleAdmin) {
             _grantRoleUnchecked(role_, account);
         } else {
             _grantRole(role_, account, msg.sender);
@@ -374,17 +375,15 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         }
     }
 
-    /// `keeper.checkPermission`: the record's roles, then the registry's. Each pair is derived
-    /// at once, since this runs on every write.
+    /// `keeper.checkPermission`: any of the registry's roles or the record's. The keeper tries the
+    /// record's first; either order answers the same, and a registry role is the usual hit.
     function _checkPermission(address sender, uint64 registryId, string memory checksum) private view {
+        (bytes32 admin, bytes32 editor) = Roles.bothForRegistry(registryId);
+        if (hasRole(admin, sender) || hasRole(editor, sender)) return;
         if (bytes(checksum).length != 0) {
             (bytes32 recordAdmin, bytes32 recordEditor) = Roles.bothForRecord(registryId, checksum);
-            if (hasRole(recordAdmin, sender)) return;
-            if (hasRole(recordEditor, sender)) return;
+            if (hasRole(recordAdmin, sender) || hasRole(recordEditor, sender)) return;
         }
-        (bytes32 admin, bytes32 editor) = Roles.bothForRegistry(registryId);
-        if (hasRole(admin, sender)) return;
-        if (hasRole(editor, sender)) return;
         revert("unauthorized");
     }
 
