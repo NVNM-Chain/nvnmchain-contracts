@@ -254,16 +254,34 @@ contract AnchoringTest is AnchoringFixture {
 
     /// Break-glass: the module admin installs a registry admin without holding the role.
     function test_the_module_admin_can_install_a_registry_admin() public {
+        _breakGlass(moduleAdmin);
+    }
+
+    /// Production puts a Safe there and someone else relays, so the sender has code and is not the
+    /// origin. The skip is the only reason either reaches `Anchoring`.
+    function test_the_module_admin_may_be_a_contract() public {
+        vm.etch(moduleAdmin, CONTRACT_CODE);
+        _breakGlass(RELAYER);
+    }
+
+    /// The break-glass is a grant: `revokeRole` carries no skip, so the Safe cannot take one back.
+    function test_the_module_admin_cannot_revoke() public {
         uint64 id = _registry(alice);
+        vm.etch(moduleAdmin, CONTRACT_CODE);
 
-        _as(moduleAdmin);
-        anchoring.grantRole(id, "", carol, Roles.ADMIN);
-        assertTrue(anchoring.hasRole(Roles.forRegistry(id, Roles.ADMIN), carol));
+        vm.prank(moduleAdmin, RELAYER);
+        vm.expectRevert("sender not an eoa");
+        anchoring.revokeRole(id, "", alice, Roles.ADMIN);
+    }
 
-        // Registry admin only; any other role goes through the check.
-        _as(moduleAdmin);
-        vm.expectRevert("missing required role");
-        anchoring.grantRole(id, "", carol, Roles.EDITOR);
+    /// The skip names the module admin alone.
+    function test_another_contract_cannot_grant() public {
+        uint64 id = _registry(alice);
+        Caller proxy = new Caller(anchoring);
+
+        vm.prank(alice, alice);
+        vm.expectRevert("sender not an eoa");
+        proxy.grantAdmin(id, carol);
     }
 
     function test_a_role_is_revoked() public {
@@ -380,6 +398,20 @@ contract AnchoringTest is AnchoringFixture {
 
     // ---- helpers ----
 
+    /// The break-glass, from a module admin whose transaction `origin` sent: a registry admin
+    /// lands, and no other role does.
+    function _breakGlass(address origin) private {
+        uint64 id = _registry(alice);
+
+        vm.prank(moduleAdmin, origin);
+        anchoring.grantRole(id, "", carol, Roles.ADMIN);
+        assertTrue(anchoring.hasRole(Roles.forRegistry(id, Roles.ADMIN), carol));
+
+        vm.prank(moduleAdmin, origin);
+        vm.expectRevert("missing required role");
+        anchoring.grantRole(id, "", carol, Roles.EDITOR);
+    }
+
     function _expectAddRecordRevert(IAnchoring.Record memory r, string memory reason) private {
         _as(alice);
         vm.expectRevert(bytes(reason));
@@ -395,6 +427,10 @@ contract AnchoringTest is AnchoringFixture {
     }
 }
 
+// Any runtime at all: code, and not a 7702 delegation.
+bytes constant CONTRACT_CODE = hex"60006000fd";
+address constant RELAYER = address(0xBEEF);
+
 /// Forwards a call, so the EOA gate has something to refuse.
 contract Caller {
     Anchoring private immutable ANCHORING;
@@ -405,5 +441,9 @@ contract Caller {
 
     function addRegistry() external returns (uint64) {
         return ANCHORING.addRegistry("us-ca1", "d", "{}");
+    }
+
+    function grantAdmin(uint64 registryId, address account) external {
+        ANCHORING.grantRole(registryId, "", account, Roles.ADMIN);
     }
 }
