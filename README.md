@@ -16,9 +16,9 @@ transactions, so `layout/` is an interface: the slot layout, the slots the contr
 
 ## Module admin
 
-`params.Admin` is a 2-of-3 amino multisig, whose address no single key derives. `ModuleAdminMultisig`
-gives that address code at genesis, the member keys' own addresses in slots 0..2; two of them
-propose and confirm a call to `Anchoring`, and nothing else.
+`params.Admin` is a 2-of-3 amino multisig, whose address no single key derives, so Tempo's genesis
+gives that address a Safe instead, owned by the member keys' own addresses. Nothing of it lives
+here: the code is Safe's own and the state is written by `tempo-xtask generate-genesis`.
 
 ## Develop
 
