@@ -27,6 +27,27 @@
       "offset": 0,
       "slot": "5",
       "type": "t_uint256"
+    },
+    {
+      "contract": "src/ModuleAdminMultisig.sol:ModuleAdminMultisig",
+      "label": "_recoveredAt",
+      "offset": 0,
+      "slot": "6",
+      "type": "t_uint256"
+    },
+    {
+      "contract": "src/ModuleAdminMultisig.sol:ModuleAdminMultisig",
+      "label": "_recovery",
+      "offset": 0,
+      "slot": "7",
+      "type": "t_address"
+    },
+    {
+      "contract": "src/ModuleAdminMultisig.sol:ModuleAdminMultisig",
+      "label": "_rotations",
+      "offset": 0,
+      "slot": "8",
+      "type": "t_mapping(t_uint256,t_array(t_address)_storage)"
     }
   ],
   "types": {
@@ -57,6 +78,13 @@
       "label": "mapping(address => bool)",
       "numberOfBytes": "32",
       "value": "t_bool"
+    },
+    "t_mapping(t_uint256,t_array(t_address)_storage)": {
+      "encoding": "mapping",
+      "key": "t_uint256",
+      "label": "mapping(uint256 => address[3])",
+      "numberOfBytes": "32",
+      "value": "t_array(t_address)_storage"
     },
     "t_mapping(t_uint256,t_mapping(t_address,t_bool))": {
       "encoding": "mapping",

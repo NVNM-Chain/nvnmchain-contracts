@@ -116,6 +116,51 @@
     "stateMutability": "nonpayable"
   },
   {
+    "type": "function",
+    "name": "proposeRotation",
+    "inputs": [
+      {
+        "name": "newOwners",
+        "type": "address[3]",
+        "internalType": "address[3]"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "id",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "recover",
+    "inputs": [
+      {
+        "name": "newOwners",
+        "type": "address[3]",
+        "internalType": "address[3]"
+      }
+    ],
+    "outputs": [],
+    "stateMutability": "nonpayable"
+  },
+  {
+    "type": "function",
+    "name": "recoveryAuthority",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "address",
+        "internalType": "address"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
     "type": "event",
     "name": "Confirmed",
     "inputs": [
@@ -185,6 +230,38 @@
     "anonymous": false
   },
   {
+    "type": "event",
+    "name": "Recovered",
+    "inputs": [
+      {
+        "name": "owners",
+        "type": "address[3]",
+        "indexed": false,
+        "internalType": "address[3]"
+      }
+    ],
+    "anonymous": false
+  },
+  {
+    "type": "event",
+    "name": "Rotated",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint256",
+        "indexed": true,
+        "internalType": "uint256"
+      },
+      {
+        "name": "owners",
+        "type": "address[3]",
+        "indexed": false,
+        "internalType": "address[3]"
+      }
+    ],
+    "anonymous": false
+  },
+  {
     "type": "error",
     "name": "AlreadyConfirmed",
     "inputs": [
@@ -208,6 +285,17 @@
         "name": "id",
         "type": "uint256",
         "internalType": "uint256"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "BadOwner",
+    "inputs": [
+      {
+        "name": "owner",
+        "type": "address",
+        "internalType": "address"
       }
     ]
   },
@@ -241,6 +329,28 @@
         "name": "caller",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "NotRecoveryAuthority",
+    "inputs": [
+      {
+        "name": "caller",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "Superseded",
+    "inputs": [
+      {
+        "name": "id",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   }
