@@ -257,14 +257,30 @@ contract AnchoringTest is AnchoringFixture {
         _breakGlass(moduleAdmin);
     }
 
-    /// Production puts a Safe there and someone else relays, so the sender has code and is not the
+    /// A chain that names a contract relays through it, so the sender has code and is not the
     /// origin. The skip is the only reason either reaches `Anchoring`.
     function test_the_module_admin_may_be_a_contract() public {
         vm.etch(moduleAdmin, CONTRACT_CODE);
         _breakGlass(RELAYER);
     }
 
-    /// The break-glass is a grant: `revokeRole` carries no skip, so the Safe cannot take one back.
+    /// The migration writes the source chain's admin into the slot this build stopped reading, so
+    /// the address it names carries no more standing than any other.
+    function test_the_slot_the_dump_writes_names_nobody() public {
+        Anchoring shipped = new Anchoring(); // names no admin, as the shipped build does
+        _as(alice);
+        uint64 id = shipped.addRegistry("us-ca1", "First Circuit", "{}");
+
+        bytes32 header = bytes32(uint256(3));
+        uint256 packed = uint256(vm.load(address(shipped), header));
+        vm.store(address(shipped), header, bytes32(packed | uint256(uint160(moduleAdmin))));
+
+        _as(moduleAdmin);
+        vm.expectRevert("missing required role");
+        shipped.grantRole(id, "", carol, Roles.ADMIN);
+    }
+
+    /// The break-glass is a grant: `revokeRole` carries no skip, so an admin cannot take one back.
     function test_the_module_admin_cannot_revoke() public {
         uint64 id = _registry(alice);
         vm.etch(moduleAdmin, CONTRACT_CODE);

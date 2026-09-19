@@ -10,7 +10,7 @@ contract StorageLayoutTest is AnchoringFixture {
     uint256 internal constant ROLE_ADMIN = 0;
     uint256 internal constant ROLE_MEMBERS = 1;
     uint256 internal constant ROLE_MEMBER_COUNT = 2;
-    uint256 internal constant MODULE_ADMIN = 3; // shares its slot with REGISTRY_COUNT
+    uint256 internal constant FORMER_ADMIN = 3; // shares its slot with REGISTRY_COUNT
     uint256 internal constant REGISTRY_COUNT = 3;
     uint256 internal constant REGISTRIES = 4;
     uint256 internal constant RECORD_COUNT = 5;
@@ -33,11 +33,15 @@ contract StorageLayoutTest is AnchoringFixture {
         recordId = anchoring.addRecord(_record(registryId, CHECKSUM));
     }
 
-    /// 20 + 8 bytes: the address low, the count above it.
-    function test_the_module_admin_and_the_registry_count_share_a_slot() public view {
-        uint256 packed = uint256(_at(MODULE_ADMIN));
-        assertEq(address(uint160(packed)), moduleAdmin, "module admin at offset 0");
+    /// 20 + 8 bytes: the migration writes an address low, the count sits above it. Nothing here
+    /// reads that address any more, so what matters is that writing it leaves the count alone.
+    function test_the_former_admin_and_the_registry_count_share_a_slot() public {
+        uint256 packed = uint256(_at(FORMER_ADMIN));
         assertEq(uint64(packed >> 160), 1, "registry count at offset 20");
+
+        vm.store(address(anchoring), bytes32(FORMER_ADMIN), bytes32(packed | uint256(uint160(moduleAdmin))));
+        assertEq(address(uint160(uint256(_at(FORMER_ADMIN)))), moduleAdmin, "the dump's write did not land");
+        assertEq(uint64(uint256(_at(FORMER_ADMIN)) >> 160), 1, "the count moved");
     }
 
     /// `mapping(uint64 => Registry)`: six slots up from the hashed key.

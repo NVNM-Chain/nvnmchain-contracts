@@ -10,7 +10,6 @@ import {IAnchoring} from "../src/IAnchoring.sol";
 contract SeedFixtureTest is Test {
     Anchoring internal anchoring;
 
-    address internal constant MODULE_ADMIN = 0x00000000000000000000000000000000000000a0;
     address internal constant ALICE = 0x00000000000000000000000000000000000A11cE;
     address internal constant BOB = 0x0000000000000000000000000000000000000B0b;
 
@@ -21,7 +20,7 @@ contract SeedFixtureTest is Test {
     /// Chosen for what a writer gets wrong: a uri on each side of 32 bytes, a second version,
     /// one checksum in two registries, a duplicate name in another case, and empty strings.
     function test_write_the_seed_fixture() public {
-        anchoring = new Anchoring(MODULE_ADMIN);
+        anchoring = new Anchoring();
         vm.warp(AT);
 
         vm.record();

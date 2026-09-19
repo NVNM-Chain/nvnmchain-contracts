@@ -16,9 +16,10 @@ transactions, so `layout/` is an interface: the slot layout, the slots the contr
 
 ## Module admin
 
-`params.Admin` is a 2-of-3 amino multisig, whose address no single key derives, so Tempo's genesis
-gives that address a Safe instead, owned by the member keys' own addresses. Nothing of it lives
-here: the code is Safe's own and the state is written by `tempo-xtask generate-genesis`.
+`Anchoring._admin()` names who may grant a registry admin without holding the role. This build
+names nobody, so the break-glass is unreachable; a chain that wants one returns it there and
+installs that build at a fork. The migration still writes the source chain's `params.Admin` into
+the slot below `_registryCount`, where nothing reads it.
 
 ## Develop
 
