@@ -19,9 +19,6 @@ layout:
 	@forge inspect Anchoring abi --json > layout/anchoring.abi.json
 	@forge test --match-path 'test/SeedFixture.t.sol' >/dev/null
 	@forge inspect Anchoring deployedBytecode > layout/anchoring.bin
-	@forge inspect ModuleAdminMultisig storage-layout --json | $(STRIP_AST_IDS) > layout/module-admin-multisig.json
-	@forge inspect ModuleAdminMultisig abi --json > layout/module-admin-multisig.abi.json
-	@forge inspect ModuleAdminMultisig deployedBytecode > layout/module-admin-multisig.bin
 
 layout-check: layout
 	@git diff --exit-code -- layout || \
