@@ -6,6 +6,19 @@ import {Anchoring} from "../../src/Anchoring.sol";
 import {IAnchoring} from "../../src/IAnchoring.sol";
 
 /// A fresh contract at a fixed block time, with the accounts and inputs the suites share.
+/// The shipped build names no module admin, so a chain that wants one installs a build like this.
+contract AnchoringWithAdmin is Anchoring {
+    address private immutable ADMIN;
+
+    constructor(address admin) {
+        ADMIN = admin;
+    }
+
+    function _admin() internal view override returns (address) {
+        return ADMIN;
+    }
+}
+
 abstract contract AnchoringFixture is Test {
     Anchoring internal anchoring;
 
@@ -18,7 +31,7 @@ abstract contract AnchoringFixture is Test {
     string internal constant URI = "https://www.courtlistener.com/opinion/8857414/richmond-v-atwood/"; // > 32 bytes
 
     function setUp() public virtual {
-        anchoring = new Anchoring(moduleAdmin);
+        anchoring = new AnchoringWithAdmin(moduleAdmin);
         vm.warp(AT);
     }
 

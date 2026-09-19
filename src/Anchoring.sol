@@ -34,9 +34,9 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     uint8 internal constant MATCH_EXACT = 1;
     uint8 internal constant MATCH_MAX = 4;
 
-    /// `params.Admin`, who may grant a registry admin without holding the role. No method sets
-    /// it; the migration writes the slot.
-    address internal _moduleAdmin;
+    /// Where the admin used to be stored. The migration still writes it and nothing reads it, so
+    /// `_registryCount` keeps the offset the dump and the explorer expect.
+    address private _formerAdmin;
 
     /// `RegistryCount`. Ids run `1..count` with no gaps, which paging relies on and the
     /// migration guarantees.
@@ -56,8 +56,11 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// Names are not unique, hence a list.
     mapping(string => uint64[]) internal _registriesByName;
 
-    constructor(address moduleAdmin) {
-        _moduleAdmin = moduleAdmin;
+    /// Who may grant a registry admin without holding the role, which this build gives to nobody.
+    /// A chain that wants a module admin returns one here and installs that build at a fork — the
+    /// only way to change it, since a boundary carries code and never storage.
+    function _admin() internal view virtual returns (address) {
+        return address(0);
     }
 
     // ---- transactions ----
@@ -156,10 +159,10 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
 
     /// @inheritdoc IAnchoring
     /// @dev `msgServer.GrantRole`. A checksum scopes the role to that record; either way the
-    ///      registry's admin role administers it. The module admin skips the EOA gate: on the old
-    ///      chain it granted through `MsgGrantRole`, which had none, and here it is a contract.
+    ///      registry's admin role administers it. The module admin skips the EOA gate, so it can
+    ///      be a contract.
     function grantRole(uint64 registryId, string calldata checksum, address account, string calldata role) external {
-        bool moduleAdmin = msg.sender == _moduleAdmin;
+        bool moduleAdmin = msg.sender == _admin();
         if (!moduleAdmin) _ensureEoaCaller();
         _validateRoleRequest(registryId, checksum, role);
         bool recordScoped = _ensureRoleScopeExists(registryId, checksum);

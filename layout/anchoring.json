@@ -23,7 +23,7 @@
     },
     {
       "contract": "src/Anchoring.sol:Anchoring",
-      "label": "_moduleAdmin",
+      "label": "_formerAdmin",
       "offset": 0,
       "slot": "3",
       "type": "t_address"
