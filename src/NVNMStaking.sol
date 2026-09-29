@@ -419,19 +419,21 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         emit CandidacyBondSet(bond);
     }
 
-    /// @notice Top-`maxSeats` candidates by `bond * acquiredWeight + delegated`, one equal seat
-    ///         each. Candidates below `minAcquired`, or weighing zero, are dropped; ties keep
-    ///         candidate-list order. Unconfigured, or below `minSeats`, elects nobody.
+    /// @notice Top-`maxSeats` candidates in `eligible` by `bond * acquiredWeight + delegated`, one
+    ///         equal seat each. Candidates below `minAcquired`, or weighing zero, are dropped; ties
+    ///         keep candidate-list order. Unconfigured, or below `minSeats`, elects nobody.
     /// @dev The consensus layer reads this at a chosen block, and that read is the snapshot.
     ///      Electing nobody must return empty rather than revert: a revert reads as a node-local
     ///      failure and stalls one node's epoch feed, where empty sends them all to the same
     ///      fallback.
-    function computeCommittee() external view returns (address[] memory vals) {
+    /// @param eligible Who the node can seat: its validator registry. Anyone else is dropped
+    ///        before the cut, or a candidate the node cannot seat takes a seat nobody fills.
+    function computeCommittee(address[] calldata eligible) external view returns (address[] memory vals) {
         StakingStorage storage $ = _s();
         uint256 maxSeats = $.maxSeats;
         if (maxSeats == 0) return vals;
 
-        (address[] memory cv, uint256[] memory cweight, uint256 m) = _weighCandidates($);
+        (address[] memory cv, uint256[] memory cweight, uint256 m) = _weighCandidates($, eligible);
         _sortByWeightDesc(cv, cweight, m);
 
         uint256 count = m.min(maxSeats);
@@ -446,7 +448,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     /// @dev Electable candidates and their weights, in candidate-list order. `m` entries are
     ///      live; the arrays are sized for the whole list.
-    function _weighCandidates(StakingStorage storage $)
+    function _weighCandidates(StakingStorage storage $, address[] calldata eligible)
         private
         view
         returns (address[] memory cv, uint256[] memory cweight, uint256 m)
@@ -461,6 +463,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         cweight = new uint256[](n);
         for (uint256 i; i < n; ++i) {
             address c = $.candidates[i];
+            if (!_contains(eligible, c)) continue;
             uint256 acquired = $.bondPaid[c];
             if (acquired < floor) continue; // delegation alone never buys a seat
             // The cap binds at the read too: lowering it sheds an incumbent's excess weight
@@ -475,6 +478,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
             cweight[m] = w;
             ++m;
         }
+    }
+
+    /// @dev A linear scan: `eligible` is the node's registry, and candidates are capped at 256.
+    function _contains(address[] calldata list, address a) private pure returns (bool) {
+        for (uint256 i; i < list.length; ++i) {
+            if (list[i] == a) return true;
+        }
+        return false;
     }
 
     /// @dev Insertion sort over the first `m` entries, heaviest first. Stable, so ties keep

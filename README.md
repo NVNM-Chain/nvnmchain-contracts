@@ -2,7 +2,7 @@
 
 Application contracts for NVM. Economics (token, staking, fee split) live here as
 upgradeable contracts; the node reads them only through an opt-in consensus hook
-(`stakingElection` → `NVNMStaking.computeCommittee()`).
+(`stakingElection` → `NVNMStaking.computeCommittee(registry)`).
 
 ## Staking and fees
 

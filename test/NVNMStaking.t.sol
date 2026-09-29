@@ -48,6 +48,11 @@ abstract contract NVNMStakingTestBase is Test {
         staking.stake(val, amt);
     }
 
+    /// @dev The committee with every candidate in the node's registry.
+    function _committee() internal view returns (address[] memory) {
+        return staking.computeCommittee(staking.candidates());
+    }
+
     /// @dev Open bonded self-registration, under the 7-day unbonding period a bond requires.
     function _openRegistration(uint256 bond) internal {
         vm.startPrank(owner);
@@ -314,7 +319,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         vm.prank(alice);
         staking.unstake(validator, 100 ether);
         // No longer elected...
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 0);
         // ...and rewards can no longer be deposited toward it (no live stake).
         vm.expectRevert(NVNMStaking.NoStakers.selector);
@@ -427,7 +432,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
 
         vm.prank(owner);
         staking.slash(validator, 10_000, treasury); // bond is 0; still elected on delegated
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals[0], validator);
     }
 
@@ -505,7 +510,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         _stake(alice, validator, 300 ether);
         _stake(bob, validator2, 150 ether);
 
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 2);
         assertEq(vals[0], validator);
         assertEq(vals[1], validator2);
@@ -525,7 +530,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.stopPrank();
         _stake(alice, validator, 400 ether); // weight 400
         // validator2: 50*10 + 0 = 500 > 400, ranks first despite less delegated.
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals[0], validator2);
         assertEq(vals[1], validator);
     }
@@ -537,7 +542,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         _stake(alice, validator, 300 ether);
         _stake(bob, validator2, 200 ether);
 
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 1);
         assertEq(vals[0], validator);
     }
@@ -547,7 +552,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         address stranger = makeAddr("nonCandidate");
         _stake(bob, stranger, 500 ether); // staked but not a candidate
 
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 0);
     }
 
@@ -560,6 +565,22 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.prank(bob);
         vm.expectRevert(NVNMStaking.DelegationCap.selector);
         staking.stake(validator, 1 ether);
+    }
+
+    function test_election_dropsCandidatesTheNodeCannotSeat() public {
+        // A candidate outside the registry would take a seat nobody fills, and a heavy one
+        // pushes a real validator below the cut.
+        _electionSetup();
+        vm.prank(owner);
+        staking.setCommitteeConfig(1, 1, 0);
+        _stake(alice, validator, 300 ether);
+        _stake(bob, validator2, 100 ether);
+
+        address[] memory registry = new address[](1);
+        registry[0] = validator2;
+        address[] memory vals = staking.computeCommittee(registry);
+        assertEq(vals.length, 1);
+        assertEq(vals[0], validator2, "the heavier candidate is not in the registry");
     }
 
     function test_election_needsAnUnbondingPeriod() public {
@@ -579,7 +600,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     function test_election_unconfiguredElectsNobody() public {
         // Empty, not a revert: the node maps a deterministic revert to a stalled epoch feed,
         // while an empty committee drops every node into the registry fallback together.
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 0);
     }
 
@@ -587,7 +608,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         _electionSetup();
         _stake(alice, validator, 300 ether);
         _stake(bob, validator2, 400 ether);
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals[0], validator2); // 400 > 300 uncapped
 
         // Lowering the cap must clamp the incumbents' election weight too, or tightening
@@ -595,7 +616,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         // clamp to 50 and the tie falls back to candidate-list order.
         vm.prank(owner);
         staking.setCommitteeConfig(21, 1, 50 ether);
-        vals = staking.computeCommittee();
+        vals = _committee();
         assertEq(vals[0], validator);
     }
 
@@ -608,12 +629,12 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
 
         vm.prank(owner);
         staking.setMinSeats(3);
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 0, "two seats below a floor of three elects nobody");
 
         vm.prank(owner);
         staking.setMinSeats(2);
-        vals = staking.computeCommittee();
+        vals = _committee();
         assertEq(vals.length, 2, "at the floor the committee seats");
         assertEq(staking.minSeats(), 2);
     }
@@ -629,7 +650,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.prank(alice);
         staking.registerCandidate(); // 50e18 bond x 2^256-1 weight overflows unchecked math
 
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 1);
         assertEq(vals[0], alice);
     }
@@ -653,7 +674,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         staking.setCommitteeConfig(21, 1, 0);
         vm.stopPrank();
         _stake(alice, validator, 300 ether);
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 0);
     }
 
@@ -690,7 +711,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.prank(owner);
         staking.setCommitteeConfig(21, 1, 0);
         _stake(bob, alice, 100 ether);
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals[0], alice);
     }
 
@@ -805,14 +826,14 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.stopPrank();
         _stake(alice, validator, 500 ether); // heavily delegated, still unbonded
 
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 0, "no bond, no seat");
 
         // Posting the bond makes the same validator electable.
         nvnm.mint(bob, 50 ether);
         vm.prank(bob);
         staking.registerCandidate();
-        vals = staking.computeCommittee();
+        vals = _committee();
         assertEq(vals.length, 1);
         assertEq(vals[0], bob);
     }
@@ -827,7 +848,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         _stake(alice, validator, 100 ether);
 
         assertEq(staking.minAcquired(), 0);
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 1, "no floor configured, delegated stake elects");
     }
 
@@ -852,7 +873,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.prank(owner);
         staking.setCommitteeConfig(21, 1, 0);
 
-        address[] memory vals = staking.computeCommittee();
+        address[] memory vals = _committee();
         assertEq(vals.length, 0, "a resigned candidate is not electable on an unbonding bond");
     }
 
