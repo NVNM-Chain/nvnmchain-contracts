@@ -72,7 +72,8 @@ contract FeeRouterTest is Test {
         vm.prank(makeAddr("keeper"));
         assertEq(router.flush(), 90 ether);
         assertEq(usd.balanceOf(operator), 10 ether);
-        assertEq(staking.earned(validator, alice), 90 ether);
+        vm.warp(vm.getBlockTimestamp() + staking.rewardDuration());
+        assertApproxEqAbs(staking.earned(validator, alice), 90 ether, 1);
         assertEq(usd.balanceOf(address(router)), 0);
     }
 
@@ -106,7 +107,8 @@ contract FeeRouterTest is Test {
         assertEq(usd.balanceOf(treasury), 25 ether);
         assertEq(usd.balanceOf(buybacks), 25 ether);
         assertEq(usd.balanceOf(operator), 10 ether);
-        assertEq(staking.earned(validator, alice), 40 ether);
+        vm.warp(vm.getBlockTimestamp() + staking.rewardDuration());
+        assertApproxEqAbs(staking.earned(validator, alice), 40 ether, 1);
     }
 
     function test_flush_zeroBalanceIsNoop() public {

@@ -48,6 +48,11 @@ abstract contract NVNMStakingTestBase is Test {
         staking.stake(val, amt);
     }
 
+    /// @dev Let every deposit so far vest in full.
+    function _vest() internal {
+        vm.warp(vm.getBlockTimestamp() + staking.rewardDuration());
+    }
+
     /// @dev The committee with every candidate in the node's registry.
     function _committee() internal view returns (address[] memory) {
         return staking.computeCommittee(staking.candidates());
@@ -93,6 +98,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
     }
 
     // -- reward distribution -------------------------------------------------
+    // Streaming rounds the rate down, so a vested deposit pays out a wei short at most.
     function test_depositReward_noStakersReverts() public {
         vm.expectRevert(NVNMStaking.NoStakers.selector);
         staking.depositReward(validator, 100 ether);
@@ -101,12 +107,13 @@ contract NVNMStakingTest is NVNMStakingTestBase {
     function test_singleStaker_getsAllRewards() public {
         _stake(alice, validator, 100 ether);
         staking.depositReward(validator, 500 ether);
-        assertEq(staking.earned(validator, alice), 500 ether);
+        _vest();
+        assertApproxEqAbs(staking.earned(validator, alice), 500 ether, 1);
 
         vm.prank(alice);
         uint256 claimed = staking.claim(validator);
-        assertEq(claimed, 500 ether);
-        assertEq(usd.balanceOf(alice), 500 ether);
+        assertApproxEqAbs(claimed, 500 ether, 1);
+        assertEq(usd.balanceOf(alice), claimed);
         assertEq(staking.earned(validator, alice), 0);
     }
 
@@ -117,6 +124,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         nvnm.mint(alice, 1_000_000 ether);
         _stake(alice, validator, 1_000_000 ether);
         staking.depositReward(validator, 5e8);
+        _vest();
         assertApproxEqAbs(staking.earned(validator, alice), 5e8, 1);
     }
 
@@ -124,49 +132,56 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         _stake(alice, validator, 300 ether);
         _stake(bob, validator, 100 ether); // 3:1
         staking.depositReward(validator, 400 ether);
-        assertEq(staking.earned(validator, alice), 300 ether);
-        assertEq(staking.earned(validator, bob), 100 ether);
+        _vest();
+        assertApproxEqAbs(staking.earned(validator, alice), 300 ether, 1);
+        assertApproxEqAbs(staking.earned(validator, bob), 100 ether, 1);
     }
 
-    function test_rewards_onlyCountStakeAtDepositTime() public {
-        // alice stakes, reward #1 is hers alone; then bob joins, reward #2 splits.
+    function test_rewards_countStakeWhileTheyVest() public {
+        // alice stakes, reward #1 vests to her alone; then bob joins, reward #2 splits.
         _stake(alice, validator, 100 ether);
         staking.depositReward(validator, 100 ether); // all alice
+        _vest();
         _stake(bob, validator, 100 ether);
         staking.depositReward(validator, 100 ether); // 50/50
+        _vest();
 
-        assertEq(staking.earned(validator, alice), 150 ether);
-        assertEq(staking.earned(validator, bob), 50 ether);
+        assertApproxEqAbs(staking.earned(validator, alice), 150 ether, 1);
+        assertApproxEqAbs(staking.earned(validator, bob), 50 ether, 1);
     }
 
     function test_stakingMore_doesNotStealPastRewards() public {
         _stake(alice, validator, 100 ether);
         staking.depositReward(validator, 100 ether); // alice earned 100
+        _vest();
         _stake(alice, validator, 900 ether); // stake up AFTER the deposit
         // The pre-existing 100 must not be diluted or re-counted.
-        assertEq(staking.earned(validator, alice), 100 ether);
+        assertApproxEqAbs(staking.earned(validator, alice), 100 ether, 1);
         staking.depositReward(validator, 50 ether); // now on 1000 staked, still all alice
-        assertEq(staking.earned(validator, alice), 150 ether);
+        _vest();
+        assertApproxEqAbs(staking.earned(validator, alice), 150 ether, 2); // a wei per deposit
     }
 
     function test_perValidator_isolation() public {
         _stake(alice, validator, 100 ether);
         _stake(bob, validator2, 100 ether);
         staking.depositReward(validator, 100 ether);
+        _vest();
         // Only validator's stakers earn; validator2's pool is untouched.
-        assertEq(staking.earned(validator, alice), 100 ether);
+        assertApproxEqAbs(staking.earned(validator, alice), 100 ether, 1);
         assertEq(staking.earned(validator2, bob), 0);
     }
 
     function test_unstake_keepsAccruedClaimable() public {
         _stake(alice, validator, 100 ether);
         staking.depositReward(validator, 100 ether);
+        _vest();
         vm.prank(alice);
         staking.unstake(validator, 100 ether); // fully exit
         // Accrued rewards survive the exit.
-        assertEq(staking.earned(validator, alice), 100 ether);
+        assertApproxEqAbs(staking.earned(validator, alice), 100 ether, 1);
         vm.prank(alice);
-        assertEq(staking.claim(validator), 100 ether);
+        assertApproxEqAbs(staking.claim(validator), 100 ether, 1);
     }
 
     // -- compounding ---------------------------------------------------------
@@ -448,6 +463,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
     function test_upgrade_preservesStakeAndRewards_onlyOwner() public {
         _stake(alice, validator, 100 ether);
         staking.depositReward(validator, 100 ether);
+        _vest();
 
         address v2 = address(new NVNMStakingV2());
         vm.prank(alice);
@@ -458,7 +474,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         staking.upgradeToAndCall(v2, "");
         assertEq(NVNMStakingV2(address(staking)).version(), 2);
         assertEq(staking.stakedOf(validator, alice), 100 ether);
-        assertEq(staking.earned(validator, alice), 100 ether);
+        assertApproxEqAbs(staking.earned(validator, alice), 100 ether, 1);
     }
 }
 
@@ -694,6 +710,8 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         staking.setCandidacyBond(1 ether);
         vm.expectRevert(Ownable.Unauthorized.selector);
         staking.setUnbondingPeriod(1 days);
+        vm.expectRevert(Ownable.Unauthorized.selector);
+        staking.setRewardDuration(1 hours);
         vm.stopPrank();
     }
 
@@ -942,5 +960,70 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.prank(bob);
         vm.expectRevert(NVNMStaking.NotCandidate.selector);
         staking.resignCandidate();
+    }
+}
+
+/// @dev Rewards vest over `rewardDuration` rather than landing whole at the deposit.
+contract NVNMStakingStreamTest is NVNMStakingTestBase {
+    function test_rewards_aStakeAroundAFlushEarnsNothing() public {
+        // The attack streaming closes: join in the block of the flush, leave in the next, and
+        // take a share of fees earned before arriving.
+        _stake(alice, validator, 100 ether);
+        _stake(bob, validator, 100 ether);
+        staking.depositReward(validator, 100 ether);
+        vm.prank(bob);
+        staking.unstake(validator, 100 ether);
+
+        _vest();
+        assertEq(staking.earned(validator, bob), 0);
+        assertApproxEqAbs(staking.earned(validator, alice), 100 ether, 1);
+    }
+
+    function test_rewards_vestOverTheDuration() public {
+        _stake(alice, validator, 100 ether);
+        staking.depositReward(validator, 100 ether);
+        assertEq(staking.earned(validator, alice), 0, "nothing at the deposit");
+
+        vm.warp(vm.getBlockTimestamp() + staking.rewardDuration() / 2);
+        assertApproxEqAbs(staking.earned(validator, alice), 50 ether, 1);
+        _vest();
+        assertApproxEqAbs(staking.earned(validator, alice), 100 ether, 1, "no more than was deposited");
+    }
+
+    function test_rewards_aDepositMidStreamCarriesTheUnvested() public {
+        _stake(alice, validator, 100 ether);
+        staking.depositReward(validator, 100 ether);
+        vm.warp(vm.getBlockTimestamp() + staking.rewardDuration() / 2);
+        staking.depositReward(validator, 100 ether); // 50 unvested + 100 over a fresh duration
+
+        _vest();
+        assertApproxEqAbs(staking.earned(validator, alice), 200 ether, 2);
+    }
+
+    function test_rewards_streamPausesWhileThePoolIsEmpty() public {
+        // Vesting to nobody would strand the tokens: the rest waits for the next stake.
+        _stake(alice, validator, 100 ether);
+        staking.depositReward(validator, 100 ether);
+        uint256 half = staking.rewardDuration() / 2;
+        vm.warp(vm.getBlockTimestamp() + half);
+        vm.prank(alice);
+        staking.unstake(validator, 100 ether);
+
+        vm.warp(vm.getBlockTimestamp() + 10 days);
+        _stake(bob, validator, 100 ether);
+        vm.warp(vm.getBlockTimestamp() + half);
+        assertApproxEqAbs(staking.earned(validator, alice), 50 ether, 1);
+        assertApproxEqAbs(staking.earned(validator, bob), 50 ether, 1);
+    }
+
+    function test_setRewardDuration_isBounded() public {
+        vm.startPrank(owner);
+        vm.expectRevert(NVNMStaking.InvalidPeriod.selector);
+        staking.setRewardDuration(0);
+        vm.expectRevert(NVNMStaking.InvalidPeriod.selector);
+        staking.setRewardDuration(31 days);
+        staking.setRewardDuration(1 hours);
+        vm.stopPrank();
+        assertEq(staking.rewardDuration(), 1 hours);
     }
 }

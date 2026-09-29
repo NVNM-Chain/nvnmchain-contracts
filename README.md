@@ -7,7 +7,7 @@ upgradeable contracts; the node reads them only through an opt-in consensus hook
 ## Staking and fees
 
 Fee waterfall and delegated staking on a fixed-supply NVNM token. Rewards are
-deposited, never minted.
+deposited, never minted, and vest over `rewardDuration` (a day by default).
 
 - **FeeRouter / FeeRouterFactory** — per-validator `feeRecipient`. The factory owns the
   protocol cuts (devshare + buybacks, 25/25 at Phase 1; Option A/B is `setProtocolSplit`);
