@@ -197,11 +197,13 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     /// @notice The exit delay for stake and bonds alike, applied to future exits only. Should
     ///         be at least one epoch once the election feeds consensus, and cannot be 0 while
-    ///         self-registration is open or a bond is posted.
+    ///         the election is configured, self-registration is open or a bond is posted.
     function setUnbondingPeriod(uint256 period) external onlyOwner {
         if (period > MAX_UNBONDING) revert InvalidPeriod();
         StakingStorage storage $ = _s();
-        if (period == 0 && ($.candidacyBond != 0 || $.bonded != 0)) revert UnbondingRequired();
+        if (period == 0 && ($.maxSeats != 0 || $.candidacyBond != 0 || $.bonded != 0)) {
+            revert UnbondingRequired();
+        }
         $.unbondingPeriod = period;
         emit UnbondingPeriodSet(period);
     }
@@ -381,10 +383,12 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     // -- committee election --------------------------------------------------
     /// @notice Election knobs: committee size (21 at Phase 5), acquired-stake overweight, and
-    ///         the per-validator delegation cap.
+    ///         the per-validator delegation cap. Needs a nonzero unbonding period: stake elects
+    ///         as it stands at the boundary block, so only the lockup after it makes a seat cost.
     function setCommitteeConfig(uint256 maxSeats_, uint256 acquiredWeight_, uint256 maxDelegated_) external onlyOwner {
         if (maxSeats_ == 0) revert ZeroAmount();
         StakingStorage storage $ = _s();
+        if ($.unbondingPeriod == 0) revert UnbondingRequired();
         $.maxSeats = maxSeats_;
         $.acquiredWeight = acquiredWeight_;
         $.maxDelegated = maxDelegated_;

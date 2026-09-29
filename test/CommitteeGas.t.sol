@@ -19,8 +19,10 @@ contract CommitteeGasTest is NVNMStakingTestBase {
             staking.setCandidate(c, true);
             staking.stake(c, (i + 1) * 1 ether);
         }
-        vm.prank(owner);
+        vm.startPrank(owner);
+        staking.setUnbondingPeriod(1 days);
         staking.setCommitteeConfig(MAX_CANDIDATES, 1, 0);
+        vm.stopPrank();
 
         uint256 before = gasleft();
         address[] memory vals = staking.computeCommittee();

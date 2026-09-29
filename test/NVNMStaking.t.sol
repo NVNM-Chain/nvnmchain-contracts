@@ -419,6 +419,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
 
     function test_slash_reducesElectionSeats() public {
         vm.startPrank(owner);
+        staking.setUnbondingPeriod(7 days);
         staking.setCandidate(validator, true);
         staking.setCommitteeConfig(21, 1, 0);
         vm.stopPrank();
@@ -492,6 +493,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     // -- committee election --------------------------------------------------
     function _electionSetup() internal {
         vm.startPrank(owner);
+        staking.setUnbondingPeriod(7 days);
         staking.setCandidate(validator, true);
         staking.setCandidate(validator2, true);
         staking.setCommitteeConfig(21, 1, 0); // top-21, equal acquired/delegated weight, no cap
@@ -550,12 +552,28 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     }
 
     function test_election_enforcesDelegationCap() public {
-        vm.prank(owner);
+        vm.startPrank(owner);
+        staking.setUnbondingPeriod(7 days);
         staking.setCommitteeConfig(21, 1, 100 ether);
+        vm.stopPrank();
         _stake(alice, validator, 100 ether);
         vm.prank(bob);
         vm.expectRevert(NVNMStaking.DelegationCap.selector);
         staking.stake(validator, 1 ether);
+    }
+
+    function test_election_needsAnUnbondingPeriod() public {
+        // Stake elects as it stands at the boundary block: with no lockup after it, stake
+        // borrowed for that one block buys a seat for the whole epoch.
+        vm.startPrank(owner);
+        vm.expectRevert(NVNMStaking.UnbondingRequired.selector);
+        staking.setCommitteeConfig(21, 1, 0);
+
+        staking.setUnbondingPeriod(7 days);
+        staking.setCommitteeConfig(21, 1, 0);
+        vm.expectRevert(NVNMStaking.UnbondingRequired.selector);
+        staking.setUnbondingPeriod(0);
+        vm.stopPrank();
     }
 
     function test_election_unconfiguredElectsNobody() public {
@@ -631,6 +649,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
 
         // Removed candidate no longer electable even with stake.
         vm.startPrank(owner);
+        staking.setUnbondingPeriod(7 days);
         staking.setCommitteeConfig(21, 1, 0);
         vm.stopPrank();
         _stake(alice, validator, 300 ether);
@@ -778,8 +797,8 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         // §7: validator stake is acquired, never delegated. Below the floor, delegation alone
         // must not buy a seat however large it is.
         vm.startPrank(owner);
-        staking.setCommitteeConfig(21, 1, 0);
         staking.setUnbondingPeriod(7 days);
+        staking.setCommitteeConfig(21, 1, 0);
         staking.setCandidacyBond(50 ether);
         staking.setCandidate(validator, true); // curated, posts no bond
         staking.setMinAcquired(50 ether);
@@ -801,6 +820,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     function test_election_minAcquiredDefaultsOff() public {
         // The PoA phases curate candidates directly with no bond posted.
         vm.startPrank(owner);
+        staking.setUnbondingPeriod(7 days);
         staking.setCommitteeConfig(21, 1, 0);
         staking.setCandidate(validator, true);
         vm.stopPrank();
@@ -812,8 +832,10 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     }
 
     function test_compoundReward_respectsDelegationCap() public {
-        vm.prank(owner);
+        vm.startPrank(owner);
+        staking.setUnbondingPeriod(7 days);
         staking.setCommitteeConfig(21, 1, 150 ether);
+        vm.stopPrank();
         _stake(alice, validator, 100 ether);
 
         nvnm.mint(address(this), 100 ether);
@@ -826,9 +848,9 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     }
 
     function test_candidacy_unbondingBondCarriesNoElectionWeight() public {
+        _resignUnderUnbonding();
         vm.prank(owner);
         staking.setCommitteeConfig(21, 1, 0);
-        _resignUnderUnbonding();
 
         address[] memory vals = staking.computeCommittee();
         assertEq(vals.length, 0, "a resigned candidate is not electable on an unbonding bond");
