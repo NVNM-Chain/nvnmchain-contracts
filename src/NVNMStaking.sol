@@ -69,6 +69,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         // minSeats: electing fewer members elects nobody. It bounds what computeCommittee
         // returns, not what the node seats: that is the registry's share of it. 0 disables.
         uint256 minSeats;
+        // Every posted bond not yet withdrawn, unbonding ones included. While it is nonzero the
+        // unbonding period cannot be 0, or a bond leaves in the block its slash was sent.
+        uint256 bonded;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nvnm.staking.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -114,6 +117,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     error ZeroShares();
     error CandidateListFull();
     error DelegationCap();
+    error UnbondingRequired();
 
     constructor() {
         _disableInitializers();
@@ -192,10 +196,13 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     /// @notice The exit delay for stake and bonds alike, applied to future exits only. Should
-    ///         be at least one epoch once the election feeds consensus.
+    ///         be at least one epoch once the election feeds consensus, and cannot be 0 while
+    ///         self-registration is open or a bond is posted.
     function setUnbondingPeriod(uint256 period) external onlyOwner {
         if (period > MAX_UNBONDING) revert InvalidPeriod();
-        _s().unbondingPeriod = period;
+        StakingStorage storage $ = _s();
+        if (period == 0 && ($.candidacyBond != 0 || $.bonded != 0)) revert UnbondingRequired();
+        $.unbondingPeriod = period;
         emit UnbondingPeriodSet(period);
     }
 
@@ -288,6 +295,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         seized = (bond * bps) / BPS;
         if (seized != 0) {
             $.bondPaid[validator] = bond - seized;
+            $.bonded -= seized;
             SafeTransferLib.safeTransfer($.stakeToken, recipient, seized);
         }
         emit Slashed(validator, bps, seized, recipient);
@@ -314,6 +322,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         // operator cycle resign/re-register to shed slashing exposure.
         if ($.bondReleaseAt[msg.sender] != 0) revert StillUnbonding();
         $.bondPaid[msg.sender] = bond;
+        $.bonded += bond;
         _addCandidate(msg.sender);
         SafeTransferLib.safeTransferFrom($.stakeToken, msg.sender, address(this), bond);
     }
@@ -332,6 +341,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         amount = $.bondPaid[msg.sender];
         $.bondPaid[msg.sender] = 0;
         $.bondReleaseAt[msg.sender] = 0;
+        $.bonded -= amount;
         if (amount != 0) SafeTransferLib.safeTransfer($.stakeToken, msg.sender, amount);
         emit BondWithdrawn(msg.sender, amount);
     }
@@ -363,16 +373,10 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         emit CandidateSet(validator, false);
         uint256 bond = $.bondPaid[validator];
         if (bond == 0) return;
-        uint256 period = $.unbondingPeriod;
-        if (period == 0) {
-            $.bondPaid[validator] = 0;
-            SafeTransferLib.safeTransfer($.stakeToken, validator, bond);
-            emit BondWithdrawn(validator, bond);
-        } else {
-            uint256 releaseAt = block.timestamp + period;
-            $.bondReleaseAt[validator] = releaseAt;
-            emit BondUnbonding(validator, bond, releaseAt);
-        }
+        // A posted bond means a nonzero period (`setUnbondingPeriod`), so this always unbonds.
+        uint256 releaseAt = block.timestamp + $.unbondingPeriod;
+        $.bondReleaseAt[validator] = releaseAt;
+        emit BondUnbonding(validator, bond, releaseAt);
     }
 
     // -- committee election --------------------------------------------------
@@ -403,8 +407,11 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     /// @notice Set the NVNM bond for permissionless candidacy (0 closes self-registration).
+    ///         Needs a nonzero unbonding period, so a bond outlasts the slash meant for it.
     function setCandidacyBond(uint256 bond) external onlyOwner {
-        _s().candidacyBond = bond;
+        StakingStorage storage $ = _s();
+        if (bond != 0 && $.unbondingPeriod == 0) revert UnbondingRequired();
+        $.candidacyBond = bond;
         emit CandidacyBondSet(bond);
     }
 
