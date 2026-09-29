@@ -26,6 +26,16 @@ contract GasBurningSwapper {
     }
 }
 
+/// @dev Records the gas each swap arrives with, and buys nothing.
+contract BudgetRecordingSwapper {
+    uint256 public received;
+
+    function swap(address, address, uint256, uint256) external returns (uint256) {
+        received = gasleft();
+        return 0;
+    }
+}
+
 contract FeeRouterTest is Test {
     uint256 constant SWAP_GAS = 1_000_000;
 
@@ -216,6 +226,26 @@ contract FeeRouterTest is Test {
         emit FeeRouter.BuybackSwapFailed(swapper, 25 ether);
         r.flush{gas: 2 * SWAP_GAS}();
         assertEq(usd.balanceOf(buybacks), 25 ether);
+    }
+
+    function test_flush_neverCompletesWithAStarvedSwap() public {
+        // The check funds the swap, not what follows it: a limit just past it may run out of gas
+        // after the call. What no limit may do is complete a flush whose swap got less.
+        _phase1Split();
+        BudgetRecordingSwapper swapper = new BudgetRecordingSwapper();
+        vm.prank(owner);
+        factory.setSwapper(address(swapper), SWAP_GAS);
+        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        usd.mint(address(r), 100 ether);
+
+        for (uint256 limit = SWAP_GAS; limit < 2 * SWAP_GAS; limit += 1000) {
+            (bool ok,) = address(r).call{gas: limit}(abi.encodeWithSignature("flush()"));
+            if (ok) {
+                assertGe(swapper.received(), SWAP_GAS - 1000, "the swap ran on less than its budget");
+                return;
+            }
+        }
+        assertTrue(false, "no limit under twice the budget completed a flush");
     }
 
     function test_factory_swapperNeedsAGasBudget() public {

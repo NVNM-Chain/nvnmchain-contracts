@@ -1,8 +1,10 @@
 # nvnmchain-contracts
 
-Application contracts for NVM. Economics (token, staking, fee split) live here as
-upgradeable contracts; the node reads them only through an opt-in consensus hook
-(`stakingElection` → `NVNMStaking.computeCommittee(registry)`).
+Application contracts for NVM, including its economics: the token, staking and the fee split.
+Only NVNMStaking is upgradeable (UUPS, owned by a Safe). FeeRouter, FeeRouterFactory,
+GuardedSwapper and BridgedNVNM change only through their owners' settings or a redeploy.
+If genesis sets `stakingElection` to the staking contract, the node picks each epoch's
+committee by calling its `computeCommittee(registry)`.
 
 ## Staking and fees
 
