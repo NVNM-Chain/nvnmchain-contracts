@@ -18,7 +18,17 @@ contract RevertingSwapper {
     }
 }
 
+/// @dev A swapper that burns whatever gas it is given.
+contract GasBurningSwapper {
+    function swap(address, address, uint256, uint256) external pure returns (uint256) {
+        while (true) {}
+        return 0;
+    }
+}
+
 contract FeeRouterTest is Test {
+    uint256 constant SWAP_GAS = 1_000_000;
+
     NVNMStaking staking;
     FeeRouterFactory factory;
     FeeRouter router;
@@ -141,7 +151,7 @@ contract FeeRouterTest is Test {
         usd.mint(address(pool), 1000 ether);
         nvnm.mint(address(pool), 1000 ether);
         vm.prank(owner);
-        factory.setSwapper(address(pool));
+        factory.setSwapper(address(pool), SWAP_GAS);
 
         FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
@@ -160,7 +170,7 @@ contract FeeRouterTest is Test {
         _phase1Split();
         address swapper = address(new RevertingSwapper());
         vm.prank(owner);
-        factory.setSwapper(swapper);
+        factory.setSwapper(swapper, SWAP_GAS);
 
         FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
@@ -174,6 +184,42 @@ contract FeeRouterTest is Test {
         assertEq(usd.balanceOf(buybacks), 25 ether, "buyback cut forwarded as stablecoin");
         assertEq(usd.balanceOf(address(r)), 0, "nothing stranded on the router");
         assertEq(usd.allowance(address(r), factory.swapper()), 0, "approval cleared");
+    }
+
+    function test_flush_revertsWhenTheCallerCannotFundTheSwap() public {
+        // Otherwise a caller picks a gas limit that starves the swap, and every buyback falls
+        // back to stablecoin.
+        _phase1Split();
+        MockSwapPool pool = new MockSwapPool(address(usd), address(nvnm));
+        usd.mint(address(pool), 1000 ether);
+        nvnm.mint(address(pool), 1000 ether);
+        vm.prank(owner);
+        factory.setSwapper(address(pool), SWAP_GAS);
+
+        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        usd.mint(address(r), 100 ether);
+        vm.expectRevert(FeeRouter.SwapUnderfunded.selector);
+        r.flush{gas: SWAP_GAS / 2}();
+    }
+
+    function test_flush_survivesASwapperThatBurnsItsBudget() public {
+        _phase1Split();
+        address swapper = address(new GasBurningSwapper());
+        vm.prank(owner);
+        factory.setSwapper(swapper, SWAP_GAS);
+
+        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        usd.mint(address(r), 100 ether);
+        vm.expectEmit(true, false, false, true, address(r));
+        emit FeeRouter.BuybackSwapFailed(swapper, 25 ether);
+        r.flush{gas: 2 * SWAP_GAS}();
+        assertEq(usd.balanceOf(buybacks), 25 ether);
+    }
+
+    function test_factory_swapperNeedsAGasBudget() public {
+        vm.prank(owner);
+        vm.expectRevert(FeeRouterFactory.ZeroGas.selector);
+        factory.setSwapper(makeAddr("swapper"), 0);
     }
 
     function test_flush_withoutSwapper_forwardsStablesToBuyback() public {
@@ -265,7 +311,7 @@ contract FeeRouterTest is Test {
         _phase1Split();
         address swapper = address(new RevertingSwapper());
         vm.prank(owner);
-        factory.setSwapper(swapper);
+        factory.setSwapper(swapper, SWAP_GAS);
 
         MockERC20 other = new MockERC20("otherUSD", "otherUSD");
         FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
@@ -321,7 +367,7 @@ contract FeeRouterTest is Test {
         usd.mint(address(pool), 1000 ether);
         nvnm.mint(address(pool), 1000 ether);
         vm.prank(owner);
-        factory.setSwapper(address(pool));
+        factory.setSwapper(address(pool), SWAP_GAS);
 
         FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
         usd.mint(address(r), 2); // 25% of 2 = 0 after truncation

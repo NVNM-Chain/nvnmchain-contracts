@@ -45,6 +45,10 @@ contract FeeRouter is ReentrancyGuard {
     error ZeroAddress();
     error InvalidBps();
     error NotFactoryOwner();
+    error SwapUnderfunded();
+
+    /// @dev CALL's own cost and argument encoding, on top of the swap's budget.
+    uint256 private constant SWAP_CALL_OVERHEAD = 10_000;
 
     constructor(address validator_, address operator_, address staking_, address factory_, uint256 commissionBps_) {
         if (validator_ == address(0) || operator_ == address(0) || staking_ == address(0)) {
@@ -132,9 +136,21 @@ contract FeeRouter is ReentrancyGuard {
             SafeTransferLib.safeTransfer(token, buy, buyAmt);
             return (devAmt, buyAmt, 0);
         }
+        boughtBack = _buyBack(token, swapper, f.swapGas(), buy, buyAmt);
+    }
+
+    /// @dev Swap the buyback cut into the stake token for `buy`, or forward it unswapped if the
+    ///      market rejects it.
+    function _buyBack(address token, address swapper, uint256 budget, address buy, uint256 buyAmt)
+        private
+        returns (uint256 boughtBack)
+    {
         address sTok = stakeToken();
         SafeTransferLib.safeApproveWithRetry(token, swapper, buyAmt);
-        try ISwapper(swapper).swap(token, sTok, buyAmt, 0) returns (uint256 out) {
+        // A fixed budget, so the caller's gas limit cannot pick the outcome: short of it the
+        // flush reverts, where the 63/64 rule would otherwise starve the swap into the fallback.
+        if (gasleft() < budget + budget / 63 + SWAP_CALL_OVERHEAD) revert SwapUnderfunded();
+        try ISwapper(swapper).swap{gas: budget}(token, sTok, buyAmt, 0) returns (uint256 out) {
             boughtBack = out;
             if (out != 0) SafeTransferLib.safeTransfer(sTok, buy, out);
         } catch {
@@ -169,6 +185,7 @@ contract FeeRouterFactory is Ownable {
     mapping(address => bool) public isRouter;
     uint256 public maxCommissionBps;
     address public swapper; // 0 = buybacks pay stables to `buyback`
+    uint256 public swapGas; // what each buyback swap gets, whatever the flush caller sends
     address public devshare;
     address public buyback;
     uint256 public devshareBps;
@@ -176,12 +193,13 @@ contract FeeRouterFactory is Ownable {
 
     event RouterCreated(address indexed validator, address router, address operator, uint256 commissionBps);
     event MaxCommissionSet(uint256 bps);
-    event SwapperSet(address swapper);
+    event SwapperSet(address swapper, uint256 swapGas);
     event ProtocolSplitSet(address devshare, address buyback, uint256 devshareBps, uint256 buybackBps);
 
     error CommissionTooHigh();
     error ZeroAddress();
     error InvalidBps();
+    error ZeroGas();
 
     constructor(address staking_, address owner_, uint256 maxCommissionBps_) {
         if (staking_ == address(0)) revert ZeroAddress();
@@ -197,13 +215,15 @@ contract FeeRouterFactory is Ownable {
         emit MaxCommissionSet(bps);
     }
 
-    /// @notice Market converting the buyback cut to NVNM. Unset, the cut is forwarded as
-    ///         stablecoin for ops to buy off-contract.
+    /// @notice Market converting the buyback cut to NVNM, and the gas each swap gets. Unset,
+    ///         the cut is forwarded as stablecoin for ops to buy off-contract.
     /// @dev Routers call it with `minOut = 0`, so all price protection lives in the swapper:
     ///      this must be a `GuardedSwapper` or equivalent, never a bare AMM.
-    function setSwapper(address swapper_) external onlyOwner {
+    function setSwapper(address swapper_, uint256 swapGas_) external onlyOwner {
+        if (swapper_ != address(0) && swapGas_ == 0) revert ZeroGas();
         swapper = swapper_;
-        emit SwapperSet(swapper_);
+        swapGas = swapGas_;
+        emit SwapperSet(swapper_, swapGas_);
     }
 
     /// @notice Protocol cuts: share of gross fees routed to `devshare` and `buyback`.
