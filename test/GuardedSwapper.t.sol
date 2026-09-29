@@ -5,6 +5,7 @@ import {GuardedSwapper} from "../src/GuardedSwapper.sol";
 import {MockERC20} from "./support/MockERC20.sol";
 import {MockSwapPool} from "./support/MockSwapPool.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {Test} from "forge-std/Test.sol";
 
 /// @dev Stands in for `FeeRouterFactory`: `keeper` plays a router it deployed.
@@ -27,6 +28,15 @@ contract ReenteringMarket {
     function swap(address tokenIn, address tokenOut, uint256 amountIn, uint256) external returns (uint256) {
         guard.swap(tokenIn, tokenOut, amountIn, 0);
         return 0;
+    }
+}
+
+/// @dev A market that sends half of what it reports.
+contract OverstatingMarket {
+    function swap(address tokenIn, address tokenOut, uint256 amountIn, uint256) external returns (uint256) {
+        SafeTransferLib.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
+        SafeTransferLib.safeTransfer(tokenOut, msg.sender, amountIn / 2);
+        return amountIn;
     }
 }
 
@@ -236,5 +246,19 @@ contract GuardedSwapperTest is Test {
         guard.setGuards(address(market), 50 ether, 500, 2000);
         vm.expectRevert(ReentrancyGuard.Reentrancy.selector);
         _swap(10 ether);
+    }
+
+    function test_swap_judgesWhatArrivedNotWhatTheMarketReports() public {
+        // Reported at 1:1, delivered at 1:2: the floor sees the delivered price, and the NVNM
+        // the swapper already holds is not there to make up the difference.
+        OverstatingMarket market = new OverstatingMarket();
+        nvnm.mint(address(market), 100 ether);
+        nvnm.mint(address(guard), 100 ether);
+        vm.prank(owner);
+        guard.setGuards(address(market), 50 ether, 500, 2000);
+
+        vm.expectRevert(GuardedSwapper.PriceBelowFloor.selector);
+        _swap(10 ether);
+        assertEq(nvnm.balanceOf(address(guard)), 100 ether);
     }
 }

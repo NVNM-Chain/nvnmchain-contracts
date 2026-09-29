@@ -107,7 +107,11 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
 
         SafeTransferLib.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
         SafeTransferLib.safeApproveWithRetry(tokenIn, market, amountIn);
-        out = ISwapper(market).swap(tokenIn, tokenOut, amountIn, minOut);
+        uint256 held = SafeTransferLib.balanceOf(tokenOut, address(this));
+        ISwapper(market).swap(tokenIn, tokenOut, amountIn, minOut);
+        // What arrived, not what the market reports: an overstated `out` would clear the floor
+        // and be paid from whatever tokenOut this contract already holds.
+        out = SafeTransferLib.balanceOf(tokenOut, address(this)) - held;
 
         uint256 price = (out * WAD) / amountIn;
         // Whichever floor binds harder. Every accepted price clears the reference floor, so the
