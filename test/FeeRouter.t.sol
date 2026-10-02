@@ -60,10 +60,8 @@ contract FeeRouterTest is Test {
         usd = new MockERC20("nUSD", "nUSD");
         staking = NVNMStaking(LibClone.deployERC1967(address(new NVNMStaking())));
         staking.initialize(owner, address(nvnm), address(usd));
-        lockbox = new FeeLockbox(owner);
-        factory = new FeeRouterFactory(address(staking), address(lockbox), owner, 10_000);
-        vm.prank(owner);
-        factory.setProtocolSplit(treasury, buybacks, 2500, 2500);
+        lockbox = new FeeLockbox(owner, 2500, 2500, 1 days);
+        factory = new FeeRouterFactory(address(staking), address(lockbox), owner, 10_000, treasury, buybacks);
         router = FeeRouter(factory.create(validator, operator, 1000)); // 10% of validator remainder
 
         nvnm.mint(alice, 1000 ether);
@@ -399,12 +397,17 @@ contract FeeRouterTest is Test {
     }
 
     function test_factory_constructorValidation() public {
+        address box = address(lockbox);
         vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
-        new FeeRouterFactory(address(0), address(lockbox), owner, 2000);
+        new FeeRouterFactory(address(0), box, owner, 2000, treasury, buybacks);
         vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
-        new FeeRouterFactory(address(staking), address(0), owner, 2000);
+        new FeeRouterFactory(address(staking), address(0), owner, 2000, treasury, buybacks);
+        vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
+        new FeeRouterFactory(address(staking), box, owner, 2000, address(0), buybacks);
+        vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
+        new FeeRouterFactory(address(staking), box, owner, 2000, treasury, address(0));
         vm.expectRevert(FeeRouterFactory.CommissionTooHigh.selector);
-        new FeeRouterFactory(address(staking), address(lockbox), owner, 10_001);
+        new FeeRouterFactory(address(staking), box, owner, 10_001, treasury, buybacks);
     }
 
     function test_factory_isDeterministicPerParams() public {
@@ -414,17 +417,6 @@ contract FeeRouterTest is Test {
         assertTrue(other != address(router));
         assertEq(FeeRouter(other).commissionBps(), 2000);
         assertEq(FeeRouter(other).rewardToken(), address(usd));
-    }
-
-    function test_setProtocolSplit_rejectsMissingRecipients() public {
-        vm.startPrank(owner);
-        vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
-        factory.setProtocolSplit(address(0), buybacks, 2500, 2500);
-        vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
-        factory.setProtocolSplit(treasury, address(0), 2500, 2500);
-        vm.expectRevert(FeeRouterFactory.InvalidBps.selector);
-        factory.setProtocolSplit(treasury, buybacks, 6000, 5000);
-        vm.stopPrank();
     }
 
     /// @dev `validator` as the registry's whole active set: a majority of one.
@@ -449,5 +441,20 @@ contract FeeRouterTest is Test {
         router.flush();
         assertEq(usd.balanceOf(operator), 50 ether, "paid straight through after it");
         assertEq(lockbox.owed(address(usd), operator), 50 ether, "the deferred share waits for a claim");
+    }
+
+    function test_flush_followsTheVotedSplit() public {
+        _seatValidator();
+        vm.prank(validator);
+        uint256 id = lockbox.proposeSplit(2000, 3000);
+        vm.warp(block.timestamp + 1 days);
+        lockbox.applySplit(id);
+
+        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        usd.mint(address(r), 100 ether);
+        r.flush();
+        assertEq(usd.balanceOf(treasury), 20 ether);
+        assertEq(usd.balanceOf(buybacks), 30 ether);
+        assertEq(lockbox.owed(address(usd), operator), 50 ether);
     }
 }

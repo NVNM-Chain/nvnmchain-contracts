@@ -11,14 +11,17 @@ committee by calling its `computeCommittee(registry)`.
 Fee waterfall and delegated staking on a fixed-supply NVNM token. Rewards are
 deposited, never minted, and vest over `rewardDuration` (a day by default).
 
-- **FeeRouter / FeeRouterFactory** — per-validator `feeRecipient`. The factory owns the
-  protocol cuts (devshare + buybacks, 25/25 at Phase 1; Option A/B is `setProtocolSplit`);
-  the remainder splits into operator commission and delegator rewards, so the delegator
+- **FeeRouter / FeeRouterFactory** — per-validator `feeRecipient`. `flush` takes the protocol
+  cuts (devshare + buybacks, to recipients fixed at deploy, in the ratios the lockbox holds),
+  then splits the remainder into operator commission and delegator rewards, so the delegator
   share comes out of the validator allocation rather than off the top. `flush` is
   permissionless, which is what most of its rules are for.
 - **FeeLockbox** — holds every operator's share until distribution commences: non-affiliated
   validators over half the registry's active set, and a majority of that set voting for it.
-  The owner declares who is affiliated, and cannot undeclare it.
+  The owner declares who is affiliated, and cannot undeclare it. Also holds the fee split
+  (25/25 at Phase 1, buybacks never below 20%), which that set votes proposal by proposal:
+  one applies after `splitDelay` while a majority backs it, and before commencement may
+  neither raise devshare nor cut the validator share.
 - **NVNMStaking** — per-validator share pools, bond-only slash once the election is
   configured (delegators are never slashed), and the committee election the node reads:
   top-N (at most 21) by

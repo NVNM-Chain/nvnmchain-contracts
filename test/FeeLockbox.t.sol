@@ -17,7 +17,7 @@ contract FeeLockboxTest is Test {
     address[] vals;
 
     function setUp() public {
-        lockbox = new FeeLockbox(owner);
+        lockbox = new FeeLockbox(owner, 2500, 2500, 1 days);
         vm.etch(address(lockbox.REGISTRY()), address(new MockValidatorConfig()).code);
         registry = MockValidatorConfig(address(lockbox.REGISTRY()));
         usd = new MockERC20("nUSD", "nUSD");
@@ -145,5 +145,126 @@ contract FeeLockboxTest is Test {
     function test_deposit_rejectsZeroOperator() public {
         vm.expectRevert(FeeLockbox.ZeroAddress.selector);
         lockbox.deposit(address(usd), address(0), 1 ether);
+    }
+
+    // -- the fee split -------------------------------------------------------
+    function _propose(uint256 by, uint256 devBps, uint256 buyBps) internal returns (uint256 id) {
+        vm.prank(vals[by]);
+        id = lockbox.proposeSplit(devBps, buyBps);
+    }
+
+    /// @dev `vals[from..to)` back proposal `id`.
+    function _back(uint256 id, uint256 from, uint256 to) internal {
+        for (uint256 i = from; i < to; ++i) {
+            vm.prank(vals[i]);
+            lockbox.voteSplit(id, true);
+        }
+    }
+
+    function test_constructor_checksTheSplit() public {
+        vm.expectRevert(FeeLockbox.BuybackBelowFloor.selector);
+        new FeeLockbox(owner, 2500, 1999, 1 days);
+        vm.expectRevert(FeeLockbox.InvalidBps.selector);
+        new FeeLockbox(owner, 6000, 5000, 1 days);
+        vm.expectRevert(FeeLockbox.ZeroDelay.selector);
+        new FeeLockbox(owner, 2500, 2500, 0);
+        assertEq(lockbox.devshareBps(), 2500);
+        assertEq(lockbox.buybackBps(), 2500);
+    }
+
+    function test_split_appliesAfterTheDelayWithAMajority() public {
+        _set(5, 4);
+        uint256 id = _propose(0, 2000, 3000); // the proposer backs it
+        _back(id, 1, 3); // three of five
+        vm.expectRevert(FeeLockbox.SplitPending.selector);
+        lockbox.applySplit(id);
+
+        vm.warp(block.timestamp + 1 days);
+        lockbox.applySplit(id);
+        assertEq(lockbox.devshareBps(), 2000);
+        assertEq(lockbox.buybackBps(), 3000);
+        vm.expectRevert(FeeLockbox.AlreadyApplied.selector);
+        lockbox.applySplit(id);
+    }
+
+    function test_split_needsAMajorityOfTheActiveSet() public {
+        _set(5, 4);
+        uint256 id = _propose(0, 2000, 3000);
+        _back(id, 1, 2); // two of five
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(FeeLockbox.VoteShort.selector);
+        lockbox.applySplit(id);
+
+        // A backer replaced in the set takes its vote with it.
+        _back(id, 2, 3);
+        vals[2] = address(uint160(0x2000));
+        registry.setActive(vals);
+        vm.expectRevert(FeeLockbox.VoteShort.selector);
+        lockbox.applySplit(id);
+    }
+
+    function test_split_votesAreProposalScoped() public {
+        _set(5, 4);
+        uint256 first = _propose(0, 2000, 3000);
+        _back(first, 1, 3);
+        uint256 second = _propose(0, 1000, 4000); // backed by its proposer only
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(FeeLockbox.VoteShort.selector);
+        lockbox.applySplit(second);
+        lockbox.applySplit(first);
+    }
+
+    function test_split_cannotPayTheFoundersBeforeCommencement() public {
+        _set(5, 4);
+        uint256 moreDev = _propose(0, 3000, 2000);
+        uint256 lessValidator = _propose(0, 2500, 3000);
+        uint256 lessDev = _propose(0, 1500, 3500);
+        _back(moreDev, 1, 3);
+        _back(lessValidator, 1, 3);
+        _back(lessDev, 1, 3);
+        vm.warp(block.timestamp + 1 days);
+        vm.expectRevert(FeeLockbox.DevshareRaised.selector);
+        lockbox.applySplit(moreDev);
+        vm.expectRevert(FeeLockbox.ValidatorShareCut.selector);
+        lockbox.applySplit(lessValidator);
+        lockbox.applySplit(lessDev);
+        assertEq(lockbox.devshareBps(), 1500);
+
+        // Once distribution has commenced the set decides freely, above the buyback floor.
+        _set(9, 4);
+        _votes(5);
+        lockbox.commence();
+        uint256 later = _propose(5, 4000, 4000);
+        _back(later, 0, 4); // five of nine with the proposer
+        vm.warp(block.timestamp + 1 days);
+        lockbox.applySplit(later);
+        assertEq(lockbox.devshareBps(), 4000);
+    }
+
+    function test_split_holdsTheBuybackFloor() public {
+        _set(5, 4);
+        vm.startPrank(vals[0]);
+        vm.expectRevert(FeeLockbox.BuybackBelowFloor.selector);
+        lockbox.proposeSplit(2500, 1999);
+        vm.expectRevert(FeeLockbox.InvalidBps.selector);
+        lockbox.proposeSplit(6000, 5000);
+        vm.stopPrank();
+    }
+
+    function test_split_onlyActiveValidatorsProposeAndVote() public {
+        _set(5, 4);
+        uint256 id = _propose(0, 2000, 3000);
+        vm.startPrank(makeAddr("stranger"));
+        vm.expectRevert(FeeLockbox.NotValidator.selector);
+        lockbox.proposeSplit(2000, 3000);
+        vm.expectRevert(FeeLockbox.NotValidator.selector);
+        lockbox.voteSplit(id, true);
+        vm.stopPrank();
+
+        vm.prank(vals[1]);
+        vm.expectRevert(FeeLockbox.NoSuchSplit.selector);
+        lockbox.voteSplit(id + 1, true);
+        vm.expectRevert(FeeLockbox.NoSuchSplit.selector);
+        lockbox.applySplit(id + 1);
     }
 }

@@ -143,20 +143,19 @@ contract FeeRouter is ReentrancyGuard {
         returns (uint256 devAmt, uint256 buyAmt, uint256 boughtBack)
     {
         if (factory == address(0)) return (0, 0, 0);
-        FeeRouterFactory f = FeeRouterFactory(factory);
-        (address dev, address buy, uint256 devBps, uint256 buyBps) = f.protocolSplit();
+        (address dev, address buy, uint256 devBps, uint256 buyBps, address swapper, uint256 swapGas) =
+            FeeRouterFactory(factory).cuts();
         devAmt = (balance * devBps) / BPS;
         buyAmt = (balance * buyBps) / BPS;
         if (devAmt != 0) SafeTransferLib.safeTransfer(token, dev, devAmt);
 
         if (buyAmt == 0) return (devAmt, 0, 0);
-        address swapper = f.swapper();
         // The swapper is bound to one pair, so anything else is forwarded like an unset one.
         if (swapper == address(0) || token != rTok) {
             SafeTransferLib.safeTransfer(token, buy, buyAmt);
             return (devAmt, buyAmt, 0);
         }
-        boughtBack = _buyBack(token, swapper, f.swapGas(), buy, buyAmt);
+        boughtBack = _buyBack(token, swapper, swapGas, buy, buyAmt);
     }
 
     /// @dev Swap the buyback cut into the stake token for `buy`, or forward it unswapped if the
@@ -198,35 +197,41 @@ contract FeeRouter is ReentrancyGuard {
 }
 
 /// @notice Deploys one deterministic FeeRouter per (validator, operator, commission). The owner
-///         sets the protocol split and the commission cap; validators self-serve under it.
+///         sets the commission cap and the swapper; the split's recipients are fixed here at
+///         deploy, and its ratios are what the lockbox's validator vote holds.
 contract FeeRouterFactory is Ownable {
     address public immutable staking;
     address public immutable lockbox; // where every router's operator share waits
+    address public immutable devshare;
+    address public immutable buyback;
     /// @dev `GuardedSwapper` reads this to decide who may move its reference price.
     mapping(address => bool) public isRouter;
     uint256 public maxCommissionBps;
     address public swapper; // 0 = buybacks pay stables to `buyback`
     uint256 public swapGas; // what each buyback swap gets, whatever the flush caller sends
-    address public devshare;
-    address public buyback;
-    uint256 public devshareBps;
-    uint256 public buybackBps;
 
     event RouterCreated(address indexed validator, address router, address operator, uint256 commissionBps);
     event MaxCommissionSet(uint256 bps);
     event SwapperSet(address swapper, uint256 swapGas);
-    event ProtocolSplitSet(address devshare, address buyback, uint256 devshareBps, uint256 buybackBps);
 
     error CommissionTooHigh();
     error ZeroAddress();
-    error InvalidBps();
     error ZeroGas();
 
-    constructor(address staking_, address lockbox_, address owner_, uint256 maxCommissionBps_) {
-        if (staking_ == address(0) || lockbox_ == address(0)) revert ZeroAddress();
+    constructor(
+        address staking_,
+        address lockbox_,
+        address owner_,
+        uint256 maxCommissionBps_,
+        address devshare_,
+        address buyback_
+    ) {
+        if (staking_ == address(0) || lockbox_ == address(0) || devshare_ == address(0) || buyback_ == address(0)) revert ZeroAddress();
         if (maxCommissionBps_ > BPS) revert CommissionTooHigh();
         staking = staking_;
         lockbox = lockbox_;
+        devshare = devshare_;
+        buyback = buyback_;
         _initializeOwner(owner_);
         maxCommissionBps = maxCommissionBps_;
     }
@@ -248,23 +253,14 @@ contract FeeRouterFactory is Ownable {
         emit SwapperSet(swapper_, swapGas_);
     }
 
-    /// @notice Protocol cuts: share of gross fees routed to `devshare` and `buyback`.
-    function setProtocolSplit(address devshare_, address buyback_, uint256 devshareBps_, uint256 buybackBps_)
+    /// @notice All a flush routes by, in one read: the cuts' recipients and ratios, and the market.
+    function cuts()
         external
-        onlyOwner
+        view
+        returns (address dev, address buy, uint256 devBps, uint256 buyBps, address swapper_, uint256 swapGas_)
     {
-        if (devshareBps_ + buybackBps_ > BPS) revert InvalidBps();
-        if (devshareBps_ != 0 && devshare_ == address(0)) revert ZeroAddress();
-        if (buybackBps_ != 0 && buyback_ == address(0)) revert ZeroAddress();
-        devshare = devshare_;
-        buyback = buyback_;
-        devshareBps = devshareBps_;
-        buybackBps = buybackBps_;
-        emit ProtocolSplitSet(devshare_, buyback_, devshareBps_, buybackBps_);
-    }
-
-    function protocolSplit() external view returns (address dev, address buy, uint256 devBps, uint256 buyBps) {
-        return (devshare, buyback, devshareBps, buybackBps);
+        (devBps, buyBps) = FeeLockbox(lockbox).split();
+        return (devshare, buyback, devBps, buyBps, swapper, swapGas);
     }
 
     function create(address validator, address operator, uint256 commissionBps) external returns (address router) {
