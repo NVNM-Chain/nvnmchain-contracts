@@ -65,6 +65,14 @@ abstract contract NVNMStakingTestBase is Test {
         staking.setCandidacyBond(bond);
         vm.stopPrank();
     }
+
+    /// @dev Configure the election (Phase 5), which is what opens slashing.
+    function _startElection() internal {
+        vm.startPrank(owner);
+        if (staking.unbondingPeriod() == 0) staking.setUnbondingPeriod(7 days);
+        staking.setCommitteeConfig(21, 1, 0);
+        vm.stopPrank();
+    }
 }
 
 /// @dev Split across two contracts (staking/rewards/exits here, candidacy and elections in
@@ -216,6 +224,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         nvnm.approve(address(staking), 10 ether);
         staking.registerCandidate();
         vm.stopPrank();
+        _startElection();
 
         vm.prank(owner);
         staking.slash(validator, 10_000, treasury);
@@ -357,6 +366,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
     function test_slash_doesNotTouchDelegators() public {
         _stake(alice, validator, 300 ether);
         _stake(bob, validator, 100 ether);
+        _startElection();
 
         vm.prank(owner);
         assertEq(staking.slash(validator, 5000, treasury), 0);
@@ -372,6 +382,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         nvnm.approve(address(staking), 100 ether);
         staking.registerCandidate();
         vm.stopPrank();
+        _startElection();
 
         // address(0) included: the node makes that call only to read the committee.
         for (address caller = bob;; caller = address(0)) {
@@ -392,6 +403,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         _stake(alice, validator, 100 ether);
         vm.prank(alice);
         staking.unstake(validator, 100 ether);
+        _startElection();
 
         vm.prank(owner);
         assertEq(staking.slash(validator, 5000, treasury), 0);
@@ -412,6 +424,24 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         vm.stopPrank();
     }
 
+    function test_slash_closedUntilTheElection() public {
+        // A bond posted during the PoA phases is not at risk until Phase 5.
+        _openRegistration(50 ether);
+        nvnm.mint(validator, 50 ether);
+        vm.startPrank(validator);
+        nvnm.approve(address(staking), 50 ether);
+        staking.registerCandidate();
+        vm.stopPrank();
+
+        vm.prank(owner);
+        vm.expectRevert(NVNMStaking.SlashingClosed.selector);
+        staking.slash(validator, 10_000, treasury);
+
+        _startElection();
+        vm.prank(owner);
+        assertEq(staking.slash(validator, 10_000, treasury), 50 ether);
+    }
+
     function test_slash_seizesCandidacyBond() public {
         _openRegistration(50 ether);
         nvnm.mint(validator, 50 ether);
@@ -420,6 +450,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         staking.registerCandidate();
         vm.stopPrank();
         _stake(alice, validator, 100 ether);
+        _startElection();
 
         vm.prank(owner);
         uint256 seized = staking.slash(validator, 5000, treasury);
@@ -817,6 +848,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         // The reason the bond unbonds at all: without it an operator front-runs its own slash
         // with `resignCandidate` and walks away whole, so nothing is ever at risk.
         _resignUnderUnbonding();
+        _startElection();
 
         vm.prank(owner);
         assertEq(staking.slash(alice, 10_000, treasury), 50 ether, "resigned bond still slashable");

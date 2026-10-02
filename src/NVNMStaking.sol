@@ -129,6 +129,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     error DelegationCap();
     error UnbondingRequired();
     error TooManySeats();
+    error SlashingClosed();
 
     constructor() {
         _disableInitializers();
@@ -333,8 +334,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     // -- slashing ------------------------------------------------------------
-    /// @notice Slash `bps` of `validator`'s bond. Delegated stake is untouched; a bond
-    ///         unbonding after a resignation is not.
+    /// @notice Slash `bps` of `validator`'s bond, once the election is configured (Phase 5).
+    ///         Delegated stake is untouched; a bond unbonding after a resignation is not.
     function slash(address validator, uint256 bps, address recipient)
         external
         onlyOwner
@@ -344,6 +345,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         if (bps == 0 || bps > BPS) revert InvalidBps();
         if (recipient == address(0)) revert ZeroAddress();
         StakingStorage storage $ = _s();
+        // The PoA phases have no validator-level slashing, bond or not.
+        if ($.maxSeats == 0) revert SlashingClosed();
 
         uint256 bond = $.bondPaid[validator];
         seized = (bond * bps) / BPS;
