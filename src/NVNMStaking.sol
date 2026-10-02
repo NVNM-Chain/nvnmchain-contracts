@@ -28,6 +28,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     uint256 private constant VIRTUAL_SHARES = 1e3;
     uint256 private constant VIRTUAL_STAKE = 1;
     uint256 private constant MAX_CANDIDATES = 256; // bounds the consensus-facing election scan
+    uint256 private constant MAX_SEATS = 21; // the validator set's cap
     uint256 private constant MAX_UNBONDING = 30 days; // the longest exit an owner may impose
     uint256 private constant MAX_REWARD_DURATION = 30 days;
 
@@ -127,6 +128,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     error CandidateListFull();
     error DelegationCap();
     error UnbondingRequired();
+    error TooManySeats();
 
     constructor() {
         _disableInitializers();
@@ -432,11 +434,12 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     // -- committee election --------------------------------------------------
-    /// @notice Election knobs: committee size (21 at Phase 5), acquired-stake overweight, and
+    /// @notice Election knobs: committee size (at most 21), acquired-stake overweight, and
     ///         the per-validator delegation cap. Needs a nonzero unbonding period: stake elects
     ///         as it stands at the boundary block, so only the lockup after it makes a seat cost.
     function setCommitteeConfig(uint256 maxSeats_, uint256 acquiredWeight_, uint256 maxDelegated_) external onlyOwner {
         if (maxSeats_ == 0) revert ZeroAmount();
+        if (maxSeats_ > MAX_SEATS) revert TooManySeats();
         StakingStorage storage $ = _s();
         if ($.unbondingPeriod == 0) revert UnbondingRequired();
         $.maxSeats = maxSeats_;

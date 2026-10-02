@@ -563,6 +563,17 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         assertEq(vals[0], validator);
     }
 
+    function test_election_capsTheCommitteeAt21() public {
+        vm.startPrank(owner);
+        staking.setUnbondingPeriod(7 days);
+        vm.expectRevert(NVNMStaking.TooManySeats.selector);
+        staking.setCommitteeConfig(22, 1, 0);
+        staking.setCommitteeConfig(21, 1, 0);
+        vm.stopPrank();
+        (uint256 seats,,) = staking.committeeConfig();
+        assertEq(seats, 21);
+    }
+
     function test_election_excludesZeroWeightAndNonCandidates() public {
         _electionSetup();
         address stranger = makeAddr("nonCandidate");

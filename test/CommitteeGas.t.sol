@@ -8,6 +8,7 @@ import {NVNMStakingTestBase} from "./NVNMStaking.t.sol";
 /// case for the eligibility scan and the insertion sort: 33M when written.
 contract CommitteeGasTest is NVNMStakingTestBase {
     uint256 constant MAX_CANDIDATES = 256;
+    uint256 constant MAX_SEATS = 21;
     uint256 constant BUDGET = 50_000_000; // a fifth of the node's limit
 
     function test_election_worstCaseFitsSystemCall() public {
@@ -21,14 +22,14 @@ contract CommitteeGasTest is NVNMStakingTestBase {
         }
         vm.startPrank(owner);
         staking.setUnbondingPeriod(1 days);
-        staking.setCommitteeConfig(MAX_CANDIDATES, 1, 0);
+        staking.setCommitteeConfig(MAX_SEATS, 1, 0);
         vm.stopPrank();
 
         uint256 before = gasleft();
         address[] memory vals = _committee();
         uint256 used = before - gasleft();
 
-        assertEq(vals.length, MAX_CANDIDATES);
+        assertEq(vals.length, MAX_SEATS);
         assertLt(used, BUDGET, "computeCommittee outgrew the node's system-call budget");
     }
 }

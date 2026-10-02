@@ -17,7 +17,7 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   share comes out of the validator allocation rather than off the top. `flush` is
   permissionless, which is what most of its rules are for.
 - **NVNMStaking** — per-validator share pools, bond-only slash (delegators are never
-  slashed), and the committee election the node reads: top-N (21 at Phase 5) by
+  slashed), and the committee election the node reads: top-N (at most 21) by
   `acquired * acquiredWeight + delegated`, one equal seat each. `candidacyBond` is the 1M
   NVNM acquired stake and `minAcquired` enforces it at election time. `minSeats` makes the
   election return nobody below it. The node then keeps only elected addresses in its
