@@ -2,6 +2,7 @@
 pragma solidity ^0.8.23;
 
 import {BPS} from "./Constants.sol";
+import {FeeLockbox} from "./FeeLockbox.sol";
 import {INVNMStaking} from "./interfaces/INVNMStaking.sol";
 import {ISwapper} from "./interfaces/ISwapper.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
@@ -13,7 +14,8 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 ///         factory's protocol cuts (devshare + buybacks), then splits what is left into operator
 ///         commission and delegator rewards — so the delegator share comes out of the validator
 ///         allocation, not off the top. At `commissionBps = 10_000` (Phases 1–4) the operator
-///         takes the whole remainder, pool or no pool.
+///         takes the whole remainder, pool or no pool, held in the factory's lockbox until
+///         distribution commences.
 /// @dev `flush` is permissionless and takes an arbitrary token, so it is guarded: a token
 ///      contract is free to call back mid-transfer.
 contract FeeRouter is ReentrancyGuard {
@@ -21,12 +23,14 @@ contract FeeRouter is ReentrancyGuard {
     address public immutable operator; // receives the commission
     address public immutable staking;
     address public immutable factory;
+    address public immutable lockbox; // the factory's; 0 without a factory
     /// @dev Of the *validator remainder* after protocol cuts, not of the gross fee.
     uint256 public immutable commissionBps;
 
     /// @notice Per token, the delegators' share the pool cannot account in. Held out of the
     ///         flushable balance, or a permissionless re-flush would cut it again.
     mapping(address => uint256) public heldForDelegators;
+    mapping(address => bool) private lockboxApproved; // token => standing allowance granted
 
     event Flushed(
         address indexed token,
@@ -59,6 +63,7 @@ contract FeeRouter is ReentrancyGuard {
         operator = operator_;
         staking = staking_;
         factory = factory_;
+        lockbox = factory_ == address(0) ? address(0) : FeeRouterFactory(factory_).lockbox();
         commissionBps = commissionBps_;
     }
 
@@ -75,7 +80,8 @@ contract FeeRouter is ReentrancyGuard {
 
     /// @notice `flush` for the staking pool's reward token.
     function flush() external returns (uint256 deposited) {
-        return flush(rewardToken());
+        address token = rewardToken();
+        return _flush(token, token);
     }
 
     /// @notice Apply protocol cuts to this router's `token` balance, then split the remainder.
@@ -83,8 +89,11 @@ contract FeeRouter is ReentrancyGuard {
     /// @dev In steady state a router holds one token, which `flush()` covers. This overload
     ///      routes everything else — a residue, or a plain transfer in — by the same rules
     ///      rather than stranding it.
-    function flush(address token) public nonReentrant returns (uint256 deposited) {
-        address rTok = rewardToken();
+    function flush(address token) external returns (uint256 deposited) {
+        return _flush(token, rewardToken());
+    }
+
+    function _flush(address token, address rTok) private nonReentrant returns (uint256 deposited) {
         uint256 held = heldForDelegators[token];
         uint256 balance = SafeTransferLib.balanceOf(token, address(this));
         balance = balance > held ? balance - held : 0; // never re-cut the escrow
@@ -114,7 +123,18 @@ contract FeeRouter is ReentrancyGuard {
             }
         }
 
-        if (commission != 0) SafeTransferLib.safeTransfer(token, operator, commission);
+        if (commission != 0) {
+            if (lockbox == address(0) || FeeLockbox(lockbox).commenced()) {
+                SafeTransferLib.safeTransfer(token, operator, commission);
+            } else {
+                // A standing allowance: one per flush would rewrite the slot every time.
+                if (!lockboxApproved[token]) {
+                    SafeTransferLib.safeApproveWithRetry(token, lockbox, type(uint256).max);
+                    lockboxApproved[token] = true;
+                }
+                FeeLockbox(lockbox).deposit(token, operator, commission);
+            }
+        }
         emit Flushed(token, commission, devAmt, buyAmt, boughtBack, deposited);
     }
 
@@ -162,15 +182,15 @@ contract FeeRouter is ReentrancyGuard {
         }
     }
 
-    /// @notice Factory-owner escape hatch for funds `flush` cannot route — chiefly an escrowed
-    ///         delegator share, to be converted and deposited to the pool by hand.
-    /// @dev Sends the whole balance, so the escrow clears with it.
+    /// @notice Factory-owner escape hatch for the escrowed delegator share, to be converted and
+    ///         deposited to the pool by hand. Nothing else: live fees are only ever routed by
+    ///         `flush`.
     function sweep(address token, address to) external nonReentrant returns (uint256 amount) {
         if (factory == address(0) || msg.sender != Ownable(factory).owner()) {
             revert NotFactoryOwner();
         }
         if (to == address(0)) revert ZeroAddress();
-        amount = SafeTransferLib.balanceOf(token, address(this));
+        amount = heldForDelegators[token];
         heldForDelegators[token] = 0;
         if (amount != 0) SafeTransferLib.safeTransfer(token, to, amount);
         emit Swept(token, to, amount);
@@ -181,6 +201,7 @@ contract FeeRouter is ReentrancyGuard {
 ///         sets the protocol split and the commission cap; validators self-serve under it.
 contract FeeRouterFactory is Ownable {
     address public immutable staking;
+    address public immutable lockbox; // where every router's operator share waits
     /// @dev `GuardedSwapper` reads this to decide who may move its reference price.
     mapping(address => bool) public isRouter;
     uint256 public maxCommissionBps;
@@ -201,10 +222,11 @@ contract FeeRouterFactory is Ownable {
     error InvalidBps();
     error ZeroGas();
 
-    constructor(address staking_, address owner_, uint256 maxCommissionBps_) {
-        if (staking_ == address(0)) revert ZeroAddress();
+    constructor(address staking_, address lockbox_, address owner_, uint256 maxCommissionBps_) {
+        if (staking_ == address(0) || lockbox_ == address(0)) revert ZeroAddress();
         if (maxCommissionBps_ > BPS) revert CommissionTooHigh();
         staking = staking_;
+        lockbox = lockbox_;
         _initializeOwner(owner_);
         maxCommissionBps = maxCommissionBps_;
     }

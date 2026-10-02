@@ -16,6 +16,9 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   the remainder splits into operator commission and delegator rewards, so the delegator
   share comes out of the validator allocation rather than off the top. `flush` is
   permissionless, which is what most of its rules are for.
+- **FeeLockbox** — holds every operator's share until distribution commences: non-affiliated
+  validators over half the registry's active set, and a majority of that set voting for it.
+  The owner declares who is affiliated, and cannot undeclare it.
 - **NVNMStaking** — per-validator share pools, bond-only slash once the election is
   configured (delegators are never slashed), and the committee election the node reads:
   top-N (at most 21) by

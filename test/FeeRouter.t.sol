@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
+import {FeeLockbox} from "../src/FeeLockbox.sol";
 import {FeeRouter, FeeRouterFactory} from "../src/FeeRouter.sol";
 import {NVNMStaking} from "../src/NVNMStaking.sol";
 import {MockERC20} from "./support/MockERC20.sol";
 import {MockSwapPool} from "./support/MockSwapPool.sol";
+import {MockValidatorConfig} from "./support/MockValidatorConfig.sol";
 import {Test} from "forge-std/Test.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
@@ -40,6 +42,7 @@ contract FeeRouterTest is Test {
     uint256 constant SWAP_GAS = 1_000_000;
 
     NVNMStaking staking;
+    FeeLockbox lockbox;
     FeeRouterFactory factory;
     FeeRouter router;
     MockERC20 nvnm;
@@ -57,7 +60,10 @@ contract FeeRouterTest is Test {
         usd = new MockERC20("nUSD", "nUSD");
         staking = NVNMStaking(LibClone.deployERC1967(address(new NVNMStaking())));
         staking.initialize(owner, address(nvnm), address(usd));
-        factory = new FeeRouterFactory(address(staking), owner, 10_000);
+        lockbox = new FeeLockbox(owner);
+        factory = new FeeRouterFactory(address(staking), address(lockbox), owner, 10_000);
+        vm.prank(owner);
+        factory.setProtocolSplit(treasury, buybacks, 2500, 2500);
         router = FeeRouter(factory.create(validator, operator, 1000)); // 10% of validator remainder
 
         nvnm.mint(alice, 1000 ether);
@@ -70,44 +76,40 @@ contract FeeRouterTest is Test {
         staking.stake(validator, amount);
     }
 
-    function _phase1Split() internal {
-        vm.prank(owner);
-        factory.setProtocolSplit(treasury, buybacks, 2500, 2500);
-    }
-
     function test_flush_splitsCommissionAndDeposits() public {
         _stake(100 ether);
         usd.mint(address(router), 100 ether);
 
+        // 25/25 cuts, then 10% commission of the 50 left.
         vm.prank(makeAddr("keeper"));
-        assertEq(router.flush(), 90 ether);
-        assertEq(usd.balanceOf(operator), 10 ether);
+        assertEq(router.flush(), 45 ether);
+        assertEq(lockbox.owed(address(usd), operator), 5 ether);
         vm.warp(vm.getBlockTimestamp() + staking.rewardDuration());
-        assertApproxEqAbs(staking.earned(validator, alice), 90 ether, 1);
+        assertApproxEqAbs(staking.earned(validator, alice), 45 ether, 1);
         assertEq(usd.balanceOf(address(router)), 0);
     }
 
-    function test_flush_paysOperatorWhenPoolEmpty() public {
-        // Validators are paid from block one, no holder staking required.
+    function test_flush_defersTheOperatorShare() public {
+        // No operator is paid before distribution commences; the lockbox holds its share.
         usd.mint(address(router), 100 ether);
         assertEq(router.flush(), 0);
-        assertEq(usd.balanceOf(operator), 100 ether);
+        assertEq(lockbox.owed(address(usd), operator), 50 ether);
+        assertEq(usd.balanceOf(address(lockbox)), 50 ether);
+        assertEq(usd.balanceOf(operator), 0);
         assertEq(usd.balanceOf(address(router)), 0);
     }
 
     function test_flush_phase1_threeWayWithNoStakers() public {
-        _phase1Split();
         FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000)); // whole validator remainder
         usd.mint(address(r), 100 ether);
 
         assertEq(r.flush(), 0);
         assertEq(usd.balanceOf(treasury), 25 ether);
         assertEq(usd.balanceOf(buybacks), 25 ether);
-        assertEq(usd.balanceOf(operator), 50 ether);
+        assertEq(lockbox.owed(address(usd), operator), 50 ether);
     }
 
     function test_flush_phase5_fourWayFromValidatorAllocation() public {
-        _phase1Split();
         _stake(100 ether);
         // 20% commission of the 50% validator remainder = 10% of gross.
         FeeRouter r = FeeRouter(factory.create(validator, operator, 2000));
@@ -116,7 +118,7 @@ contract FeeRouterTest is Test {
         assertEq(r.flush(), 40 ether);
         assertEq(usd.balanceOf(treasury), 25 ether);
         assertEq(usd.balanceOf(buybacks), 25 ether);
-        assertEq(usd.balanceOf(operator), 10 ether);
+        assertEq(lockbox.owed(address(usd), operator), 10 ether);
         vm.warp(vm.getBlockTimestamp() + staking.rewardDuration());
         assertApproxEqAbs(staking.earned(validator, alice), 40 ether, 1);
     }
@@ -130,7 +132,7 @@ contract FeeRouterTest is Test {
         _stake(1 ether);
         FeeRouter zero = FeeRouter(factory.create(validator, operator, 0));
         usd.mint(address(zero), 50 ether);
-        assertEq(zero.flush(), 50 ether);
+        assertEq(zero.flush(), 25 ether);
 
         FeeRouter all = new FeeRouter(validator, operator, address(staking), address(0), 10_000);
         usd.mint(address(all), 50 ether);
@@ -158,7 +160,6 @@ contract FeeRouterTest is Test {
     }
 
     function test_flush_buybackSwapsToSink() public {
-        _phase1Split();
         MockSwapPool pool = new MockSwapPool(address(usd), address(nvnm));
         usd.mint(address(pool), 1000 ether);
         nvnm.mint(address(pool), 1000 ether);
@@ -171,7 +172,7 @@ contract FeeRouterTest is Test {
         uint256 expectedOut = (uint256(1000 ether) * 25 ether) / uint256(1025 ether);
         assertEq(r.flush(), 0);
         assertEq(usd.balanceOf(treasury), 25 ether);
-        assertEq(usd.balanceOf(operator), 50 ether);
+        assertEq(lockbox.owed(address(usd), operator), 50 ether);
         assertEq(nvnm.balanceOf(buybacks), expectedOut);
         assertEq(staking.stakedOf(validator, alice), 0, "buyback does not compound into a pool");
     }
@@ -179,7 +180,6 @@ contract FeeRouterTest is Test {
     function test_flush_survivesARejectingSwapper() public {
         // If a rejected market took the whole flush down with it, one bad pool would stop
         // devshare, commission and delegator payouts on every router at once.
-        _phase1Split();
         address swapper = address(new RevertingSwapper());
         vm.prank(owner);
         factory.setSwapper(swapper, SWAP_GAS);
@@ -192,7 +192,7 @@ contract FeeRouterTest is Test {
         r.flush();
 
         assertEq(usd.balanceOf(treasury), 25 ether, "devshare still paid");
-        assertEq(usd.balanceOf(operator), 50 ether, "operator still paid");
+        assertEq(lockbox.owed(address(usd), operator), 50 ether, "operator share still deferred");
         assertEq(usd.balanceOf(buybacks), 25 ether, "buyback cut forwarded as stablecoin");
         assertEq(usd.balanceOf(address(r)), 0, "nothing stranded on the router");
         assertEq(usd.allowance(address(r), factory.swapper()), 0, "approval cleared");
@@ -201,7 +201,6 @@ contract FeeRouterTest is Test {
     function test_flush_revertsWhenTheCallerCannotFundTheSwap() public {
         // Otherwise a caller picks a gas limit that starves the swap, and every buyback falls
         // back to stablecoin.
-        _phase1Split();
         MockSwapPool pool = new MockSwapPool(address(usd), address(nvnm));
         usd.mint(address(pool), 1000 ether);
         nvnm.mint(address(pool), 1000 ether);
@@ -215,7 +214,6 @@ contract FeeRouterTest is Test {
     }
 
     function test_flush_survivesASwapperThatBurnsItsBudget() public {
-        _phase1Split();
         address swapper = address(new GasBurningSwapper());
         vm.prank(owner);
         factory.setSwapper(swapper, SWAP_GAS);
@@ -231,7 +229,6 @@ contract FeeRouterTest is Test {
     function test_flush_neverCompletesWithAStarvedSwap() public {
         // The check funds the swap, not what follows it: a limit just past it may run out of gas
         // after the call. What no limit may do is complete a flush whose swap got less.
-        _phase1Split();
         BudgetRecordingSwapper swapper = new BudgetRecordingSwapper();
         vm.prank(owner);
         factory.setSwapper(address(swapper), SWAP_GAS);
@@ -255,7 +252,6 @@ contract FeeRouterTest is Test {
     }
 
     function test_flush_withoutSwapper_forwardsStablesToBuyback() public {
-        _phase1Split();
         FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
         r.flush();
@@ -267,7 +263,6 @@ contract FeeRouterTest is Test {
         // normally holds one. This is the case where that preference points somewhere other
         // than the pool's reward token: the cuts are still owed, and flushing only
         // `rewardToken` would leave them unpaid.
-        _phase1Split();
         MockERC20 other = new MockERC20("otherUSD", "otherUSD");
         FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
         other.mint(address(r), 100 ether);
@@ -276,14 +271,13 @@ contract FeeRouterTest is Test {
 
         assertEq(other.balanceOf(treasury), 25 ether, "devshare paid in the second token");
         assertEq(other.balanceOf(buybacks), 25 ether, "buyback cut forwarded as-is");
-        assertEq(other.balanceOf(operator), 50 ether, "operator paid the validator remainder");
+        assertEq(lockbox.owed(address(other), operator), 50 ether, "operator owed the validator remainder");
         assertEq(other.balanceOf(address(r)), 0);
     }
 
     function test_flush_holdsTheDelegatorShareOfAnUnpoolableToken() public {
         // The pool only accounts in `rewardToken`. Paying the delegators' share to the operator
         // instead would fund the validator out of its delegators' allocation.
-        _phase1Split();
         _stake(100 ether);
         MockERC20 other = new MockERC20("otherUSD", "otherUSD");
         other.mint(address(router), 100 ether); // setUp's router: 10% commission
@@ -294,7 +288,7 @@ contract FeeRouterTest is Test {
 
         assertEq(other.balanceOf(treasury), 25 ether, "protocol cuts still pay");
         assertEq(other.balanceOf(buybacks), 25 ether);
-        assertEq(other.balanceOf(operator), 5 ether, "operator gets commission only");
+        assertEq(lockbox.owed(address(other), operator), 5 ether, "operator owed commission only");
         assertEq(other.balanceOf(address(router)), 45 ether, "delegators' share stays put");
         assertEq(staking.earned(validator, alice), 0);
     }
@@ -303,7 +297,6 @@ contract FeeRouterTest is Test {
         // flush is permissionless. If the held share stayed in the flushable balance, anyone
         // could call flush repeatedly and grind the delegators' funds into devshare, buybacks
         // and the operator a quarter at a time.
-        _phase1Split();
         _stake(100 ether);
         MockERC20 other = new MockERC20("otherUSD", "otherUSD");
         other.mint(address(router), 100 ether);
@@ -313,16 +306,15 @@ contract FeeRouterTest is Test {
         assertEq(router.heldForDelegators(address(other)), 45 ether);
 
         uint256 devBefore = other.balanceOf(treasury);
-        uint256 opBefore = other.balanceOf(operator);
+        uint256 opBefore = lockbox.owed(address(other), operator);
         assertEq(router.flush(address(other)), 0, "second flush finds nothing new");
 
         assertEq(other.balanceOf(treasury), devBefore, "devshare not taken twice");
-        assertEq(other.balanceOf(operator), opBefore, "commission not taken twice");
+        assertEq(lockbox.owed(address(other), operator), opBefore, "commission not taken twice");
         assertEq(other.balanceOf(address(router)), 45 ether, "delegators' share intact");
     }
 
     function test_sweep_clearsTheHeldDelegatorShare() public {
-        _phase1Split();
         _stake(100 ether);
         MockERC20 other = new MockERC20("otherUSD", "otherUSD");
         other.mint(address(router), 100 ether);
@@ -340,7 +332,6 @@ contract FeeRouterTest is Test {
 
     function test_flush_swapsOnlyTheRewardToken() public {
         // The swapper is bound to one pair, so a second fee token must not be routed into it.
-        _phase1Split();
         address swapper = address(new RevertingSwapper());
         vm.prank(owner);
         factory.setSwapper(swapper, SWAP_GAS);
@@ -355,7 +346,6 @@ contract FeeRouterTest is Test {
     }
 
     function test_flush_defaultsToTheRewardToken() public {
-        _phase1Split();
         FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
         r.flush();
@@ -370,19 +360,21 @@ contract FeeRouterTest is Test {
         new FeeRouter(validator, operator, address(staking), address(0), 10_001);
     }
 
-    function test_sweep_rescuesStrayBalance() public {
+    function test_sweep_takesOnlyTheHeldShare() public {
+        // Live fees are flush's to route; sweeping them would hand the owner the whole balance.
         usd.mint(address(router), 100 ether);
-        // flush routes fee tokens, including ones the pool cannot hold; sweep is for what it
-        // is not meant to route — a held delegator share, or stray non-fee tokens like these.
         nvnm.mint(address(router), 5 ether);
 
         vm.prank(makeAddr("stranger"));
         vm.expectRevert(FeeRouter.NotFactoryOwner.selector);
-        router.sweep(address(nvnm), operator);
+        router.sweep(address(usd), operator);
 
-        vm.prank(owner);
-        assertEq(router.sweep(address(nvnm), operator), 5 ether);
-        assertEq(nvnm.balanceOf(operator), 5 ether);
+        vm.startPrank(owner);
+        assertEq(router.sweep(address(usd), operator), 0);
+        assertEq(router.sweep(address(nvnm), operator), 0);
+        vm.stopPrank();
+        assertEq(usd.balanceOf(address(router)), 100 ether, "fees stay for flush");
+        assertEq(nvnm.balanceOf(address(router)), 5 ether);
     }
 
     function test_sweep_unreachableForFactorylessRouter() public {
@@ -394,7 +386,6 @@ contract FeeRouterTest is Test {
     }
 
     function test_flush_dustBuybackDoesNotRevert() public {
-        _phase1Split();
         MockSwapPool pool = new MockSwapPool(address(usd), address(nvnm));
         usd.mint(address(pool), 1000 ether);
         nvnm.mint(address(pool), 1000 ether);
@@ -404,14 +395,16 @@ contract FeeRouterTest is Test {
         FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
         usd.mint(address(r), 2); // 25% of 2 = 0 after truncation
         assertEq(r.flush(), 0);
-        assertEq(usd.balanceOf(operator), 2);
+        assertEq(lockbox.owed(address(usd), operator), 2);
     }
 
     function test_factory_constructorValidation() public {
         vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
-        new FeeRouterFactory(address(0), owner, 2000);
+        new FeeRouterFactory(address(0), address(lockbox), owner, 2000);
+        vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
+        new FeeRouterFactory(address(staking), address(0), owner, 2000);
         vm.expectRevert(FeeRouterFactory.CommissionTooHigh.selector);
-        new FeeRouterFactory(address(staking), owner, 10_001);
+        new FeeRouterFactory(address(staking), address(lockbox), owner, 10_001);
     }
 
     function test_factory_isDeterministicPerParams() public {
@@ -427,8 +420,34 @@ contract FeeRouterTest is Test {
         vm.startPrank(owner);
         vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
         factory.setProtocolSplit(address(0), buybacks, 2500, 2500);
+        vm.expectRevert(FeeRouterFactory.ZeroAddress.selector);
+        factory.setProtocolSplit(treasury, address(0), 2500, 2500);
         vm.expectRevert(FeeRouterFactory.InvalidBps.selector);
         factory.setProtocolSplit(treasury, buybacks, 6000, 5000);
         vm.stopPrank();
+    }
+
+    /// @dev `validator` as the registry's whole active set: a majority of one.
+    function _seatValidator() internal {
+        vm.etch(address(lockbox.REGISTRY()), address(new MockValidatorConfig()).code);
+        address[] memory set = new address[](1);
+        set[0] = validator;
+        MockValidatorConfig(address(lockbox.REGISTRY())).setActive(set);
+    }
+
+    function test_flush_paysTheOperatorOnceCommenced() public {
+        usd.mint(address(router), 100 ether);
+        router.flush();
+        assertEq(lockbox.owed(address(usd), operator), 50 ether, "deferred before commencement");
+
+        _seatValidator();
+        vm.prank(validator);
+        lockbox.vote(true);
+        lockbox.commence();
+
+        usd.mint(address(router), 100 ether);
+        router.flush();
+        assertEq(usd.balanceOf(operator), 50 ether, "paid straight through after it");
+        assertEq(lockbox.owed(address(usd), operator), 50 ether, "the deferred share waits for a claim");
     }
 }
