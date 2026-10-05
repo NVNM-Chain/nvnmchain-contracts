@@ -600,6 +600,46 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         assertEq(vals[1], validator);
     }
 
+    function test_election_weightIsTheElectionScore() public {
+        vm.startPrank(owner);
+        staking.setCandidate(validator, true);
+        staking.setUnbondingPeriod(7 days);
+        staking.setCandidacyBond(50 ether);
+        staking.setCommitteeConfig(1, 10, 0); // one seat; acquired counts 10x
+        vm.stopPrank();
+        nvnm.mint(validator2, 50 ether);
+        vm.startPrank(validator2);
+        nvnm.approve(address(staking), 50 ether);
+        staking.registerCandidate();
+        vm.stopPrank();
+        _stake(alice, validator, 400 ether);
+        _stake(bob, makeAddr("notACandidate"), 100 ether);
+        vm.prank(owner);
+        staking.setCommitteeConfig(1, 10, 300 ether); // the cap binds at the read
+
+        address[] memory who = new address[](3);
+        (who[0], who[1], who[2]) = (validator2, validator, makeAddr("notACandidate"));
+        uint256[] memory weights = staking.electionWeight(who);
+        assertEq(_committee().length, 1, "one seat");
+        assertEq(weights[0], 500 ether, "bond 50 at 10x");
+        assertEq(weights[1], 300 ether, "outside the committee, still weighed: 400 capped at 300");
+        assertEq(weights[2], 0, "not a candidate");
+
+        vm.prank(owner);
+        staking.setMinAcquired(60 ether);
+        weights = staking.electionWeight(who);
+        assertEq(weights[0], 0, "below minAcquired");
+    }
+
+    function test_election_weightIsZeroUntilConfigured() public {
+        vm.prank(owner);
+        staking.setCandidate(validator, true);
+        _stake(alice, validator, 100 ether);
+        address[] memory who = new address[](1);
+        who[0] = validator;
+        assertEq(staking.electionWeight(who)[0], 0);
+    }
+
     function test_election_respectsCommitteeSize() public {
         _electionSetup();
         vm.prank(owner);

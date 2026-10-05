@@ -4,7 +4,8 @@ Application contracts for NVM, including its economics: the token, staking and t
 Only NVNMStaking is upgradeable (UUPS, owned by a timelock). FeeRouter, FeeRouterFactory,
 GuardedSwapper and BridgedNVNM change only through their owners' settings or a redeploy.
 If genesis sets `stakingElection` to the staking contract, the node picks each epoch's
-committee by calling its `computeCommittee(registry)`.
+committee by calling its `computeCommittee(registry)`, and from NVNM1 draws block proposers by
+`electionWeight`, the same score for any address, elected or not.
 
 ## Staking and fees
 

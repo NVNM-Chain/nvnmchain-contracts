@@ -17,8 +17,9 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 ///      delegators can exit before a change lands. `slasher` acts without that delay, or a
 ///      resigning validator would withdraw its bond before a queued slash; `slash` seizes only
 ///      the validator's acquired bond — delegators are never slashed. Election is top-N by
-///      `acquired * acquiredWeight + delegated`, one equal seat each, because the consensus
-///      engine is unit-weighted. Stake and bond both exit through the unbonding period.
+///      `acquired * acquiredWeight + delegated`. Each seat votes once; the node draws block
+///      proposers by the same score (`electionWeight`). Stake and bond both exit through the
+///      unbonding period.
 contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard {
     using FixedPointMathLib for uint256;
 
@@ -511,6 +512,21 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         }
     }
 
+    /// @notice Each of `who`'s election score, as `computeCommittee` ranks by. Zero for an
+    ///         address it would not rank (not a candidate, or below `minAcquired`) and for every
+    ///         address while the election is unconfigured. The node draws block proposers by it.
+    /// @dev Not cut to the committee: the node asks about the keys that hold this epoch's
+    ///      shares, which the election may rank outside it by now.
+    function electionWeight(address[] calldata who) external view returns (uint256[] memory weights) {
+        StakingStorage storage $ = _s();
+        weights = new uint256[](who.length);
+        if ($.maxSeats == 0) return weights;
+        (uint256 weightMul, uint256 floor, uint256 cap) = _weighing($);
+        for (uint256 i; i < who.length; ++i) {
+            if ($.candidateIndex[who[i]] != 0) weights[i] = _score($, who[i], weightMul, floor, cap);
+        }
+    }
+
     /// @dev Electable candidates and their weights, in candidate-list order. `m` entries are
     ///      live; the arrays are sized for the whole list.
     function _weighCandidates(StakingStorage storage $, address[] calldata eligible)
@@ -518,31 +534,42 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         view
         returns (address[] memory cv, uint256[] memory cweight, uint256 m)
     {
-        uint256 weightMul = $.acquiredWeight;
-        if (weightMul == 0) weightMul = 1;
-        uint256 floor = $.minAcquired;
-        uint256 cap = $.maxDelegated;
-
+        (uint256 weightMul, uint256 floor, uint256 cap) = _weighing($);
         uint256 n = $.candidates.length;
         cv = new address[](n);
         cweight = new uint256[](n);
         for (uint256 i; i < n; ++i) {
             address c = $.candidates[i];
             if (!_contains(eligible, c)) continue;
-            uint256 acquired = $.bondPaid[c];
-            if (acquired < floor) continue; // delegation alone never buys a seat
-            // The cap binds at the read too: lowering it sheds an incumbent's excess weight
-            // rather than only refusing new stake.
-            uint256 delegated = $.totalStaked[c].min(cap == 0 ? type(uint256).max : cap);
-            // Saturating, because this read must be total: a checked overflow would be a
-            // deterministic revert, which the node maps to a stalled epoch feed rather than
-            // the registry fallback.
-            uint256 w = acquired.saturatingMul(weightMul).saturatingAdd(delegated);
+            uint256 w = _score($, c, weightMul, floor, cap);
             if (w == 0) continue;
             cv[m] = c;
             cweight[m] = w;
             ++m;
         }
+    }
+
+    /// @dev The election's knobs with their defaults applied: an unset weight is 1, an unset cap
+    ///      none.
+    function _weighing(StakingStorage storage $) private view returns (uint256 weightMul, uint256 floor, uint256 cap) {
+        weightMul = $.acquiredWeight == 0 ? 1 : $.acquiredWeight;
+        floor = $.minAcquired;
+        cap = $.maxDelegated == 0 ? type(uint256).max : $.maxDelegated;
+    }
+
+    /// @dev `c`'s score: `bond * acquiredWeight + min(delegated, cap)`, or 0 below `floor`.
+    function _score(StakingStorage storage $, address c, uint256 weightMul, uint256 floor, uint256 cap)
+        private
+        view
+        returns (uint256)
+    {
+        uint256 acquired = $.bondPaid[c];
+        if (acquired < floor) return 0; // delegation alone never buys a seat
+        // The cap binds at the read too: lowering it sheds an incumbent's excess weight rather
+        // than only refusing new stake. Saturating, because this read must be total: a checked
+        // overflow would be a deterministic revert, which the node maps to a stalled epoch feed
+        // rather than the registry fallback.
+        return acquired.saturatingMul(weightMul).saturatingAdd($.totalStaked[c].min(cap));
     }
 
     /// @dev A linear scan: `eligible` is the node's registry, and candidates are capped at 256.
