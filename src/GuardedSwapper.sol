@@ -17,11 +17,11 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 ///      honest drift; `maxDriftBps` against the owner-seeded `refPrice` is what stops the EMA
 ///      being walked down, since alone it decays with the price it guards.
 ///
-///      `swap` is owner-and-routers-only because moving the EMA is otherwise near-free: a direct
-///      caller keeps the output, where a router's goes to the buyback wallet. Router creation is
-///      permissionless, so the gate makes that costly rather than impossible. It is also guarded:
-///      the inner market runs before the EMA moves, and a market re-entering through another
-///      router would otherwise be judged against the stale price.
+///      `swap` is routers-only because moving the EMA is otherwise near-free: a direct caller,
+///      the owner included, keeps the output, where a router's goes to the buyback sink. Router
+///      creation is permissionless, so the gate makes that costly rather than impossible. It is
+///      also guarded: the inner market runs before the EMA moves, and a market re-entering
+///      through another router would otherwise be judged against the stale price.
 contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
     uint256 private constant WAD = 1e18;
 
@@ -79,7 +79,7 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
         emit DriftBandSet(maxDriftBps_);
     }
 
-    /// @notice The `FeeRouterFactory` whose routers may call `swap`. 0 leaves only the owner.
+    /// @notice The `FeeRouterFactory` whose routers may call `swap`. 0 stops every swap.
     function setRouterFactory(address routerFactory_) external onlyOwner {
         routerFactory = routerFactory_;
         emit RouterFactorySet(routerFactory_);
@@ -129,7 +129,6 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
     }
 
     function _authorized(address caller) private view returns (bool) {
-        if (caller == owner()) return true;
         address factory = routerFactory;
         return factory != address(0) && FeeRouterFactory(factory).isRouter(caller);
     }

@@ -2,19 +2,21 @@
 pragma solidity ^0.8.23;
 
 import {BPS} from "./Constants.sol";
+import {FeeLockbox} from "./FeeLockbox.sol";
 import {IFeeManager} from "./interfaces/IFeeManager.sol";
 import {INVNMStaking} from "./interfaces/INVNMStaking.sol";
-import {ISwapper} from "./interfaces/ISwapper.sol";
+import {ISwapCap, ISwapper} from "./interfaces/ISwapper.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 /// @title FeeRouter
 /// @notice Per-validator fee splitter, paid by `FeeManager.distributeFees`. `flush` takes the
-///         factory's protocol cuts (devshare + buybacks), then splits what is left into operator
-///         commission and delegator rewards — so the delegator share comes out of the validator
-///         allocation, not off the top. At `commissionBps = 10_000` (Phases 1–4) the operator
-///         takes the whole remainder, pool or no pool.
+///         factory's protocol cuts — devshare, and buybacks swapped to NVNM for a dead address,
+///         held here until a swap clears — then splits what is left into operator commission
+///         and delegator rewards, so the delegator share comes out of the validator allocation,
+///         not off the top. Until the lockbox commences distribution the operator is owed the
+///         whole remainder there, whatever the commission.
 /// @dev `flush` is permissionless and takes an arbitrary token, so it is guarded: a token
 ///      contract is free to call back mid-transfer.
 contract FeeRouter is ReentrancyGuard {
@@ -24,12 +26,17 @@ contract FeeRouter is ReentrancyGuard {
     address public immutable operator; // receives the commission
     address public immutable staking;
     address public immutable factory;
+    address public immutable lockbox; // the factory's
     /// @dev Of the *validator remainder* after protocol cuts, not of the gross fee.
     uint256 public immutable commissionBps;
 
     /// @notice Per token, the delegators' share the pool cannot account in. Held out of the
     ///         flushable balance, or a permissionless re-flush would cut it again.
     mapping(address => uint256) public heldForDelegators;
+    /// @notice Per token, the buyback cut not yet swapped, retried by every flush: unset swapper,
+    ///         a rejected swap, or a token the swapper does not take. Never forwarded unswapped.
+    mapping(address => uint256) public heldForBuyback;
+    mapping(address => bool) private lockboxApproved; // token => standing allowance granted
 
     event Flushed(
         address indexed token,
@@ -40,7 +47,7 @@ contract FeeRouter is ReentrancyGuard {
         uint256 deposited
     );
     event Swept(address indexed token, address indexed to, uint256 amount);
-    /// @notice The buyback cut was forwarded as stablecoin because the swapper rejected it.
+    /// @notice The swapper rejected `amount` of the buyback cut, which stays held for a retry.
     event BuybackSwapFailed(address indexed swapper, uint256 amount);
     /// @notice A delegator share was added to `heldForDelegators` instead of being paid out.
     event DelegatorShareUnrouted(address indexed token, uint256 amount);
@@ -62,6 +69,7 @@ contract FeeRouter is ReentrancyGuard {
         operator = operator_;
         staking = staking_;
         factory = factory_;
+        lockbox = FeeRouterFactory(factory_).lockbox();
         commissionBps = commissionBps_;
     }
 
@@ -85,7 +93,8 @@ contract FeeRouter is ReentrancyGuard {
 
     /// @notice `flush` for the staking pool's reward token.
     function flush() external returns (uint256 deposited) {
-        return flush(rewardToken());
+        address token = rewardToken();
+        return _flush(token, token);
     }
 
     /// @notice Apply protocol cuts to this router's `token` balance, then split the remainder.
@@ -93,17 +102,22 @@ contract FeeRouter is ReentrancyGuard {
     /// @dev In steady state a router holds one token, which `flush()` covers. This overload
     ///      routes everything else — a residue, or a plain transfer in — by the same rules
     ///      rather than stranding it.
-    function flush(address token) public nonReentrant returns (uint256 deposited) {
-        address rTok = rewardToken();
-        uint256 held = heldForDelegators[token];
+    function flush(address token) external returns (uint256 deposited) {
+        return _flush(token, rewardToken());
+    }
+
+    function _flush(address token, address rTok) private nonReentrant returns (uint256 deposited) {
+        uint256 reserved = heldForDelegators[token] + heldForBuyback[token];
         uint256 balance = SafeTransferLib.balanceOf(token, address(this));
-        balance = balance > held ? balance - held : 0; // never re-cut the escrow
-        if (balance == 0) return 0;
+        balance = balance > reserved ? balance - reserved : 0; // never re-cut what is held
+        if (balance == 0 && heldForBuyback[token] == 0) return 0;
 
         (uint256 devAmt, uint256 buyAmt, uint256 boughtBack) = _protocolCuts(token, balance, rTok);
         uint256 remainder = balance - devAmt - buyAmt;
 
-        uint256 commission = (remainder * commissionBps) / BPS;
+        // Delegators wait too: a 0% router over a self-staked pool would otherwise pay out at once.
+        bool deferred = !FeeLockbox(lockbox).commenced();
+        uint256 commission = deferred ? remainder : (remainder * commissionBps) / BPS;
         uint256 delegatorAmt = remainder - commission;
 
         if (delegatorAmt != 0) {
@@ -119,12 +133,23 @@ contract FeeRouter is ReentrancyGuard {
             } else {
                 // Owed to stakers, but the pool only accounts in `rewardToken`. Escrow beats
                 // paying the validator out of the delegators' allocation.
-                heldForDelegators[token] = held + delegatorAmt;
+                heldForDelegators[token] += delegatorAmt;
                 emit DelegatorShareUnrouted(token, delegatorAmt);
             }
         }
 
-        if (commission != 0) SafeTransferLib.safeTransfer(token, operator, commission);
+        if (commission != 0) {
+            if (!deferred) {
+                SafeTransferLib.safeTransfer(token, operator, commission);
+            } else {
+                // A standing allowance: one per flush would rewrite the slot every time.
+                if (!lockboxApproved[token]) {
+                    SafeTransferLib.safeApproveWithRetry(token, lockbox, type(uint256).max);
+                    lockboxApproved[token] = true;
+                }
+                FeeLockbox(lockbox).deposit(token, operator, commission);
+            }
+        }
         emit Flushed(token, commission, devAmt, buyAmt, boughtBack, deposited);
     }
 
@@ -132,52 +157,64 @@ contract FeeRouter is ReentrancyGuard {
         private
         returns (uint256 devAmt, uint256 buyAmt, uint256 boughtBack)
     {
-        FeeRouterFactory f = FeeRouterFactory(factory);
-        (address dev, address buy, uint256 devBps, uint256 buyBps) = f.protocolSplit();
+        (address dev, address buy, uint256 devBps, uint256 buyBps, address swapper, uint256 swapGas) =
+            FeeRouterFactory(factory).cuts();
         devAmt = (balance * devBps) / BPS;
         buyAmt = (balance * buyBps) / BPS;
         if (devAmt != 0) SafeTransferLib.safeTransfer(token, dev, devAmt);
 
-        if (buyAmt == 0) return (devAmt, 0, 0);
-        address swapper = f.swapper();
-        // The swapper is bound to one pair, so anything else is forwarded like an unset one.
-        if (swapper == address(0) || token != rTok) {
-            SafeTransferLib.safeTransfer(token, buy, buyAmt);
-            return (devAmt, buyAmt, 0);
-        }
-        boughtBack = _buyBack(token, swapper, f.swapGas(), buy, buyAmt);
+        boughtBack = _buyBack(token, rTok, swapper, swapGas, buy, buyAmt);
     }
 
-    /// @dev Swap the buyback cut into the stake token for `buy`, or forward it unswapped if the
-    ///      market rejects it.
-    function _buyBack(address token, address swapper, uint256 budget, address buy, uint256 buyAmt)
+    /// @dev Swap what the swapper takes of the held and new buyback cut into the stake token for
+    ///      `sink`; the rest stays held for the next flush.
+    function _buyBack(address token, address rTok, address swapper, uint256 budget, address sink, uint256 buyAmt)
         private
         returns (uint256 boughtBack)
     {
+        uint256 pending = heldForBuyback[token] + buyAmt;
+        // The swapper is bound to one pair, so anything else waits, as all of it does unset.
+        if (pending != 0 && swapper != address(0) && token == rTok) {
+            uint256 amount = pending;
+            try ISwapCap(swapper).maxAmountIn() returns (uint256 cap) {
+                if (cap < amount) amount = cap;
+            } catch {} // a bare market takes any size
+            if (amount != 0) {
+                bool ok;
+                (ok, boughtBack) = _swap(token, swapper, budget, sink, amount);
+                if (ok) pending -= amount;
+            }
+        }
+        heldForBuyback[token] = pending;
+    }
+
+    /// @dev One swap of `amount` into the stake token for `sink`. A rejected swap spends nothing.
+    function _swap(address token, address swapper, uint256 budget, address sink, uint256 amount)
+        private
+        returns (bool ok, uint256 out)
+    {
         address sTok = stakeToken();
-        SafeTransferLib.safeApproveWithRetry(token, swapper, buyAmt);
+        SafeTransferLib.safeApproveWithRetry(token, swapper, amount);
         // A fixed budget, so the caller's gas limit cannot pick the outcome: short of it the
         // flush reverts, where the 63/64 rule would otherwise starve the swap into the fallback.
         if (gasleft() < budget + budget / 63 + SWAP_CALL_OVERHEAD) revert SwapUnderfunded();
-        try ISwapper(swapper).swap{gas: budget}(token, sTok, buyAmt, 0) returns (uint256 out) {
-            boughtBack = out;
-            if (out != 0) SafeTransferLib.safeTransfer(sTok, buy, out);
+        try ISwapper(swapper).swap{gas: budget}(token, sTok, amount, 0) returns (uint256 got) {
+            (ok, out) = (true, got);
+            if (got != 0) SafeTransferLib.safeTransfer(sTok, sink, got);
         } catch {
-            // One bad pool must not strand every other leg behind it. Fall back to the
-            // unconfigured-swapper route and let ops convert.
+            // One bad pool must not strand every other leg behind it: the cut waits for a retry.
             SafeTransferLib.safeApproveWithRetry(token, swapper, 0);
-            SafeTransferLib.safeTransfer(token, buy, buyAmt);
-            emit BuybackSwapFailed(swapper, buyAmt);
+            emit BuybackSwapFailed(swapper, amount);
         }
     }
 
-    /// @notice Factory-owner escape hatch for funds `flush` cannot route — chiefly an escrowed
-    ///         delegator share, to be converted and deposited to the pool by hand.
-    /// @dev Sends the whole balance, so the escrow clears with it.
+    /// @notice Factory-owner escape hatch for the escrowed delegator share, to be converted and
+    ///         deposited to the pool by hand. Nothing else: live fees are only ever routed by
+    ///         `flush`.
     function sweep(address token, address to) external nonReentrant returns (uint256 amount) {
         if (msg.sender != Ownable(factory).owner()) revert NotFactoryOwner();
         if (to == address(0)) revert ZeroAddress();
-        amount = SafeTransferLib.balanceOf(token, address(this));
+        amount = heldForDelegators[token];
         heldForDelegators[token] = 0;
         if (amount != 0) SafeTransferLib.safeTransfer(token, to, amount);
         emit Swept(token, to, amount);
@@ -185,33 +222,35 @@ contract FeeRouter is ReentrancyGuard {
 }
 
 /// @notice Deploys one deterministic FeeRouter per (validator, operator, commission). The owner
-///         sets the protocol split and the commission cap; validators self-serve under it.
+///         sets the commission cap and the swapper; devshare's recipient is fixed here at deploy,
+///         buybacks go to `BUYBACK_SINK`, and the ratios are what the lockbox's validator vote holds.
 contract FeeRouterFactory is Ownable {
+    /// @notice Where bought-back NVNM goes: no key, so it never moves again.
+    address public constant BUYBACK_SINK = 0x000000000000000000000000000000000000dEaD;
+
     address public immutable staking;
+    address public immutable lockbox; // where every router's operator share waits
+    address public immutable devshare;
     /// @dev `GuardedSwapper` reads this to decide who may move its reference price.
     mapping(address => bool) public isRouter;
     uint256 public maxCommissionBps;
-    address public swapper; // 0 = buybacks pay stables to `buyback`
+    address public swapper; // 0 = routers hold the buyback cut
     uint256 public swapGas; // what each buyback swap gets, whatever the flush caller sends
-    address public devshare;
-    address public buyback;
-    uint256 public devshareBps;
-    uint256 public buybackBps;
 
     event RouterCreated(address indexed validator, address router, address operator, uint256 commissionBps);
     event MaxCommissionSet(uint256 bps);
     event SwapperSet(address swapper, uint256 swapGas);
-    event ProtocolSplitSet(address devshare, address buyback, uint256 devshareBps, uint256 buybackBps);
 
     error CommissionTooHigh();
     error ZeroAddress();
-    error InvalidBps();
     error ZeroGas();
 
-    constructor(address staking_, address owner_, uint256 maxCommissionBps_) {
-        if (staking_ == address(0)) revert ZeroAddress();
+    constructor(address staking_, address lockbox_, address owner_, uint256 maxCommissionBps_, address devshare_) {
+        if (staking_ == address(0) || lockbox_ == address(0) || devshare_ == address(0)) revert ZeroAddress();
         if (maxCommissionBps_ > BPS) revert CommissionTooHigh();
         staking = staking_;
+        lockbox = lockbox_;
+        devshare = devshare_;
         _initializeOwner(owner_);
         maxCommissionBps = maxCommissionBps_;
     }
@@ -223,7 +262,7 @@ contract FeeRouterFactory is Ownable {
     }
 
     /// @notice Market converting the buyback cut to NVNM, and the gas each swap gets. Unset,
-    ///         the cut is forwarded as stablecoin for ops to buy off-contract.
+    ///         routers hold the cut until one is set.
     /// @dev Routers call it with `minOut = 0`, so all price protection lives in the swapper:
     ///      this must be a `GuardedSwapper` or equivalent, never a bare AMM.
     function setSwapper(address swapper_, uint256 swapGas_) external onlyOwner {
@@ -233,23 +272,14 @@ contract FeeRouterFactory is Ownable {
         emit SwapperSet(swapper_, swapGas_);
     }
 
-    /// @notice Protocol cuts: share of gross fees routed to `devshare` and `buyback`.
-    function setProtocolSplit(address devshare_, address buyback_, uint256 devshareBps_, uint256 buybackBps_)
+    /// @notice All a flush routes by, in one read: the cuts' recipients and ratios, and the market.
+    function cuts()
         external
-        onlyOwner
+        view
+        returns (address dev, address buy, uint256 devBps, uint256 buyBps, address swapper_, uint256 swapGas_)
     {
-        if (devshareBps_ + buybackBps_ > BPS) revert InvalidBps();
-        if (devshareBps_ != 0 && devshare_ == address(0)) revert ZeroAddress();
-        if (buybackBps_ != 0 && buyback_ == address(0)) revert ZeroAddress();
-        devshare = devshare_;
-        buyback = buyback_;
-        devshareBps = devshareBps_;
-        buybackBps = buybackBps_;
-        emit ProtocolSplitSet(devshare_, buyback_, devshareBps_, buybackBps_);
-    }
-
-    function protocolSplit() external view returns (address dev, address buy, uint256 devBps, uint256 buyBps) {
-        return (devshare, buyback, devshareBps, buybackBps);
+        (devBps, buyBps) = FeeLockbox(lockbox).split();
+        return (devshare, BUYBACK_SINK, devBps, buyBps, swapper, swapGas);
     }
 
     function create(address validator, address operator, uint256 commissionBps) external returns (address router) {

@@ -11,12 +11,20 @@ committee by calling its `computeCommittee(registry)`.
 Fee waterfall and delegated staking on a fixed-supply NVNM token. Rewards are
 deposited, never minted, and vest over `rewardDuration` (a day by default).
 
-- **FeeRouter / FeeRouterFactory** — per-validator `feeRecipient`. The factory owns the
-  protocol cuts (devshare + buybacks, 25/25 at Phase 1; Option A/B is `setProtocolSplit`);
-  the remainder splits into operator commission and delegator rewards, so the delegator
-  share comes out of the validator allocation rather than off the top. `flush` is
-  permissionless, which is what most of its rules are for. `setValidatorToken()` has FeeManager
-  pay the router in the pool's reward token (USDT0 on mainnet).
+- **FeeRouter / FeeRouterFactory** — per-validator `feeRecipient`. `flush` takes the protocol
+  cuts in the ratios the lockbox holds — devshare to a fixed recipient, buybacks swapped to
+  NVNM for `0x…dEaD` and held on the router until a swap clears — then splits the remainder
+  into operator commission and delegator rewards, so the delegator share comes out of the
+  validator allocation rather than off the top. `flush` is permissionless, which is what most
+  of its rules are for. `setValidatorToken()` has FeeManager pay the router in the pool's
+  reward token (USDT0 on mainnet).
+- **FeeLockbox** — holds every router's validator share, delegators' included, owed to its
+  operator until distribution commences: non-affiliated validators over half the registry's
+  active set, and a majority of that set voting for it. The owner declares every validator
+  affiliated or not, once, before it can commence. Also holds the fee split (25/25 at
+  Phase 1, buybacks never below 20%), which that set votes proposal by proposal: one applies
+  once a majority has backed it for `splitDelay`, and before commencement may neither raise
+  devshare nor cut the validator share.
 - **NVNMStaking** — per-validator share pools, and the committee election the node reads:
   top-N (at most 21) by `acquired * acquiredWeight + delegated`, one equal seat each.
   `candidacyBond` is the 1M NVNM acquired stake, which `minAcquired` enforces at election
@@ -27,7 +35,7 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   validator would withdraw its bond first.
 - **GuardedSwapper** — buyback-market wrapper: a per-swap size cap and a two-sided price
   floor, so a sandwiched pool makes the swap revert instead of donating the buyback. Only
-  the owner and the factory's routers may swap.
+  the factory's routers may swap, not the owner.
 - **BridgedNVNM** — L1 ERC-20; only Safe-curated BRIDGE adapters mint/burn.
 
 Each contract's own NatSpec carries the rest — why `flush` takes a token, why the EMA

@@ -107,7 +107,9 @@ contract GuardedSwapperTest is Test {
 
     function test_swap_requiresSeedAndInner() public {
         GuardedSwapper fresh = new GuardedSwapper(owner, address(usd), address(nvnm));
-        vm.prank(owner); // an unconfigured swapper has no factory, so only the owner gets past the gate
+        vm.prank(owner);
+        fresh.setRouterFactory(address(registry));
+        vm.prank(keeper);
         vm.expectRevert(GuardedSwapper.NotSeeded.selector);
         fresh.swap(address(usd), address(nvnm), 1 ether, 0);
     }
@@ -157,25 +159,26 @@ contract GuardedSwapperTest is Test {
         assertGt(_swap(5 ether), 0);
     }
 
-    function test_swap_onlyOwnerAndRoutersMayMoveThePrice() public {
+    function test_swap_onlyRoutersMayMoveThePrice() public {
         // An open `swap` is near-free EMA manipulation: the caller keeps the output and trades
-        // at the pool's real price. Only the owner and the factory's routers get in.
+        // at the pool's real price. Only the factory's routers get in, not even the owner.
         vm.prank(stranger);
         vm.expectRevert(GuardedSwapper.NotAuthorized.selector);
         guard.swap(address(usd), address(nvnm), 1 ether, 0);
 
-        registry.set(stranger, true);
-        vm.prank(stranger);
-        assertGt(guard.swap(address(usd), address(nvnm), 1 ether, 0), 0);
-
         usd.mint(owner, 10 ether);
         vm.startPrank(owner);
         usd.approve(address(guard), type(uint256).max);
-        assertGt(guard.swap(address(usd), address(nvnm), 1 ether, 0), 0);
+        vm.expectRevert(GuardedSwapper.NotAuthorized.selector);
+        guard.swap(address(usd), address(nvnm), 1 ether, 0);
         vm.stopPrank();
+
+        registry.set(stranger, true);
+        vm.prank(stranger);
+        assertGt(guard.swap(address(usd), address(nvnm), 1 ether, 0), 0);
     }
 
-    function test_swap_unsetFactoryLeavesOwnerOnly() public {
+    function test_swap_unsetFactoryStopsEverySwap() public {
         vm.prank(owner);
         guard.setRouterFactory(address(0));
         vm.prank(keeper);
