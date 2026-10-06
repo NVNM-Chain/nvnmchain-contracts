@@ -2,6 +2,7 @@
 pragma solidity ^0.8.23;
 
 import {BPS} from "./Constants.sol";
+import {IBondGateway} from "./interfaces/IBondGateway.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {Initializable} from "solady/utils/Initializable.sol";
@@ -85,6 +86,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         mapping(address => uint256) rewardFinish; // validator => when the stream runs dry
         mapping(address => uint256) rewardUpdated; // validator => last accrual
         address slasher; // may slash bonds without the owner's delay; 0 = nobody
+        // The L1 bridge gateway: bonds arrive only through it and leave or are seized through it,
+        // so each stays tied to its validator's bond on Ethereum.
+        address bondGateway;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nvnm.staking.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -114,7 +118,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     event Withdrawn(address indexed validator, address indexed user, uint256 amount);
     event BondUnbonding(address indexed validator, uint256 amount, uint256 releaseAt);
     event BondWithdrawn(address indexed validator, uint256 amount);
-    event Slashed(address indexed validator, uint256 bps, uint256 seized, address indexed recipient);
+    event BondReceived(address indexed validator, uint256 amount, uint256 bond);
+    event BondGatewaySet(address gateway);
+    event Slashed(address indexed validator, uint256 bps, uint256 seized);
 
     // -- errors --------------------------------------------------------------
     error ZeroAmount();
@@ -136,6 +142,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     error UnbondingRequired();
     error TooManySeats();
     error SlashingClosed();
+    error NotBondGateway();
+    error BondTooSmall();
 
     constructor() {
         _disableInitializers();
@@ -340,26 +348,26 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     // -- slashing ------------------------------------------------------------
-    /// @notice Slash `bps` of `validator`'s bond, once the election is configured (Phase 5).
-    ///         Delegated stake is untouched; a bond unbonding after a resignation is not.
-    ///         Only the slasher: the owner's delay would let the bond leave first.
-    function slash(address validator, uint256 bps, address recipient) external nonReentrant returns (uint256 seized) {
+    /// @notice Slash `bps` of `validator`'s bond, once the election is configured (Phase 5), and
+    ///         seize as much of its bond on Ethereum. Delegated stake is untouched; a bond
+    ///         unbonding after a resignation is not. Only the slasher: the owner's delay would let
+    ///         the bond leave first. The slasher pays the bridge's fee (see {IBondGateway}).
+    function slash(address validator, uint256 bps) external nonReentrant returns (uint256 seized) {
         StakingStorage storage $ = _s();
         // An unset slasher must not admit address(0), which the node calls from.
         if ($.slasher == address(0) || msg.sender != $.slasher) revert NotSlasher();
         if (bps == 0 || bps > BPS) revert InvalidBps();
-        if (recipient == address(0)) revert ZeroAddress();
         // The PoA phases have no validator-level slashing, bond or not.
         if ($.maxSeats == 0) revert SlashingClosed();
 
         uint256 bond = $.bondPaid[validator];
         seized = (bond * bps) / BPS;
+        emit Slashed(validator, bps, seized);
         if (seized != 0) {
             $.bondPaid[validator] = bond - seized;
             $.bonded -= seized;
-            SafeTransferLib.safeTransfer($.stakeToken, recipient, seized);
+            _approvedGateway($, seized).seize(validator, seized, msg.sender);
         }
-        emit Slashed(validator, bps, seized, recipient);
     }
 
     // -- candidacy -----------------------------------------------------------
@@ -374,26 +382,45 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         }
     }
 
-    /// @notice Self-register as an electable validator by posting the NVNM candidacy bond.
+    /// @notice `amount` more of `validator`'s bond, which the gateway has just minted here from
+    ///         `validator`'s bond on Ethereum. Stands `validator` for election once the bond
+    ///         reaches `candidacyBond`, if nothing else stops it.
+    /// @dev Never reverts for the bond's sake: it is already locked on Ethereum, and a delivery
+    ///      that reverted would leave it there with no record here.
+    function bondFromBridge(address validator, uint256 amount) external {
+        StakingStorage storage $ = _s();
+        if (msg.sender != $.bondGateway) revert NotBondGateway();
+        uint256 bond = $.bondPaid[validator] + amount;
+        $.bondPaid[validator] = bond;
+        $.bonded += amount;
+        emit BondReceived(validator, amount, bond);
+        if (
+            $.candidacyBond != 0 && bond >= $.candidacyBond && $.candidateIndex[validator] == 0
+                && $.bondReleaseAt[validator] == 0 && $.candidates.length < MAX_CANDIDATES
+        ) _addCandidate(validator);
+    }
+
+    /// @notice Stand for election on a bond bridged in at least `candidacyBond` deep, as one that
+    ///         arrived while the list was full or the bond was unbonding. Cancels the unbonding.
     function registerCandidate() external nonReentrant {
         StakingStorage storage $ = _s();
         uint256 bond = $.candidacyBond;
         if (bond == 0) revert CandidacyClosed();
-        // Withdraw a prior bond first: overwriting it here loses the balance, and lets an
-        // operator cycle resign/re-register to shed slashing exposure.
-        if ($.bondReleaseAt[msg.sender] != 0) revert StillUnbonding();
-        $.bondPaid[msg.sender] = bond;
-        $.bonded += bond;
+        if ($.bondPaid[msg.sender] < bond) revert BondTooSmall();
         _addCandidate(msg.sender);
-        SafeTransferLib.safeTransferFrom($.stakeToken, msg.sender, address(this), bond);
     }
 
-    /// @notice Resign candidacy; the bond unbonds and is claimed with `withdrawBond`.
+    /// @notice Leave the election, or give up a bond that never stood: either way the bond
+    ///         unbonds, to be sent home with `withdrawBond`.
     function resignCandidate() external nonReentrant {
-        _removeCandidate(msg.sender);
+        StakingStorage storage $ = _s();
+        if ($.candidateIndex[msg.sender] != 0) return _removeCandidate(msg.sender);
+        if ($.bondPaid[msg.sender] == 0 || $.bondReleaseAt[msg.sender] != 0) revert NotCandidate();
+        _unbondBond($, msg.sender);
     }
 
-    /// @notice Withdraw your matured candidacy bond, net of any slashing during unbonding.
+    /// @notice Send your matured bond, net of any slashing during unbonding, home to your bond on
+    ///         Ethereum. You pay the bridge's fee (see {IBondGateway}).
     function withdrawBond() external nonReentrant returns (uint256 amount) {
         StakingStorage storage $ = _s();
         uint256 releaseAt = $.bondReleaseAt[msg.sender];
@@ -403,8 +430,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         $.bondPaid[msg.sender] = 0;
         $.bondReleaseAt[msg.sender] = 0;
         $.bonded -= amount;
-        if (amount != 0) SafeTransferLib.safeTransfer($.stakeToken, msg.sender, amount);
         emit BondWithdrawn(msg.sender, amount);
+        if (amount != 0) _approvedGateway($, amount).returnBond(msg.sender, amount, msg.sender);
+    }
+
+    /// @dev The gateway, approved to burn `amount` of the bonds held here.
+    function _approvedGateway(StakingStorage storage $, uint256 amount) private returns (IBondGateway gateway) {
+        gateway = IBondGateway($.bondGateway);
+        SafeTransferLib.safeApprove($.stakeToken, address(gateway), amount);
     }
 
     function _addCandidate(address validator) private {
@@ -432,12 +465,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         list.pop();
         $.candidateIndex[validator] = 0;
         emit CandidateSet(validator, false);
-        uint256 bond = $.bondPaid[validator];
-        if (bond == 0) return;
-        // A posted bond means a nonzero period (`setUnbondingPeriod`), so this always unbonds.
+        if ($.bondPaid[validator] != 0) _unbondBond($, validator);
+    }
+
+    function _unbondBond(StakingStorage storage $, address validator) private {
+        // A zero period means slashing is closed (`setUnbondingPeriod`): releasing at once loses nothing.
         uint256 releaseAt = block.timestamp + $.unbondingPeriod;
         $.bondReleaseAt[validator] = releaseAt;
-        emit BondUnbonding(validator, bond, releaseAt);
+        emit BondUnbonding(validator, $.bondPaid[validator], releaseAt);
     }
 
     // -- committee election --------------------------------------------------
@@ -474,6 +509,12 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     function setSlasher(address slasher_) external onlyOwner {
         _s().slasher = slasher_;
         emit SlasherSet(slasher_);
+    }
+
+    /// @notice The L1 bridge gateway that bonds arrive through and leave by.
+    function setBondGateway(address gateway) external onlyOwner {
+        _s().bondGateway = gateway;
+        emit BondGatewaySet(gateway);
     }
 
     /// @notice Set the NVNM bond for permissionless candidacy (0 closes self-registration).
@@ -643,6 +684,10 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     function slasher() external view returns (address) {
         return _s().slasher;
+    }
+
+    function bondGateway() external view returns (address) {
+        return _s().bondGateway;
     }
 
     function bondOf(address validator) external view returns (uint256) {

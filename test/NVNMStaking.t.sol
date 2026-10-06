@@ -2,6 +2,7 @@
 pragma solidity ^0.8.23;
 
 import {NVNMStaking} from "../src/NVNMStaking.sol";
+import {MockBondGateway} from "./support/MockBondGateway.sol";
 import {MockERC20} from "./support/MockERC20.sol";
 import {Test} from "forge-std/Test.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
@@ -17,6 +18,7 @@ abstract contract NVNMStakingTestBase is Test {
     NVNMStaking staking;
     MockERC20 nvnm; // stake token
     MockERC20 usd; // reward token (fee stablecoin)
+    MockBondGateway gateway;
 
     address owner = makeAddr("safe");
     address slasher = makeAddr("slasher");
@@ -24,7 +26,6 @@ abstract contract NVNMStakingTestBase is Test {
     address validator2 = makeAddr("validator2");
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
-    address treasury = makeAddr("treasury");
 
     function setUp() public {
         nvnm = new MockERC20("NVNM", "NVNM");
@@ -32,8 +33,11 @@ abstract contract NVNMStakingTestBase is Test {
         address impl = address(new NVNMStaking());
         staking = NVNMStaking(LibClone.deployERC1967(impl));
         staking.initialize(owner, address(nvnm), address(usd));
-        vm.prank(owner);
+        gateway = new MockBondGateway(nvnm);
+        vm.startPrank(owner);
         staking.setSlasher(slasher);
+        staking.setBondGateway(address(gateway));
+        vm.stopPrank();
 
         for (address who = alice;; who = bob) {
             nvnm.mint(who, 1000 ether);
@@ -49,6 +53,11 @@ abstract contract NVNMStakingTestBase is Test {
     function _stake(address who, address val, uint256 amt) internal {
         vm.prank(who);
         staking.stake(val, amt);
+    }
+
+    /// @dev `amount` more of `who`'s bond, bridged in from Ethereum.
+    function _bond(address who, uint256 amount) internal {
+        gateway.deliverBond(staking, who, amount);
     }
 
     /// @dev Let every deposit so far vest in full.
@@ -222,15 +231,11 @@ contract NVNMStakingTest is NVNMStakingTestBase {
     function test_slash_doesNotCollapseDelegatorPool() public {
         _stake(alice, validator, 100 ether);
         _openRegistration(10 ether);
-        nvnm.mint(validator, 10 ether);
-        vm.startPrank(validator);
-        nvnm.approve(address(staking), 10 ether);
-        staking.registerCandidate();
-        vm.stopPrank();
+        _bond(validator, 10 ether);
         _startElection();
 
         vm.prank(slasher);
-        staking.slash(validator, 10_000, treasury);
+        staking.slash(validator, 10_000);
 
         nvnm.mint(address(this), 1 ether);
         nvnm.approve(address(staking), 1 ether);
@@ -372,7 +377,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         _startElection();
 
         vm.prank(slasher);
-        assertEq(staking.slash(validator, 5000, treasury), 0);
+        assertEq(staking.slash(validator, 5000), 0);
         assertEq(staking.stakedOf(validator, alice), 300 ether);
         assertEq(staking.stakedOf(validator, bob), 100 ether);
         assertEq(staking.totalStaked(validator), 400 ether);
@@ -380,11 +385,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
 
     function test_slash_slasherOnly() public {
         _openRegistration(100 ether);
-        nvnm.mint(validator, 100 ether);
-        vm.startPrank(validator);
-        nvnm.approve(address(staking), 100 ether);
-        staking.registerCandidate();
-        vm.stopPrank();
+        _bond(validator, 100 ether);
         _startElection();
 
         // address(0) included: the node makes that call only to read the committee. The owner
@@ -393,19 +394,21 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         for (uint256 i; i < callers.length; ++i) {
             vm.prank(callers[i]);
             vm.expectRevert(NVNMStaking.NotSlasher.selector);
-            staking.slash(validator, 1000, treasury);
+            staking.slash(validator, 1000);
         }
 
         vm.prank(slasher);
-        assertEq(staking.slash(validator, 1000, treasury), 10 ether);
+        assertEq(staking.slash(validator, 1000), 10 ether);
         assertEq(staking.bondOf(validator), 90 ether);
+        assertEq(gateway.seized(validator), 10 ether, "and seized on Ethereum");
+        assertEq(gateway.feePayer(), slasher, "the slasher pays the bridge");
 
         // Unset, nobody slashes, address(0) included.
         vm.prank(owner);
         staking.setSlasher(address(0));
         vm.prank(address(0));
         vm.expectRevert(NVNMStaking.NotSlasher.selector);
-        staking.slash(validator, 1000, treasury);
+        staking.slash(validator, 1000);
     }
 
     function test_setSlasher_ownerOnly() public {
@@ -424,7 +427,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         _startElection();
 
         vm.prank(slasher);
-        assertEq(staking.slash(validator, 5000, treasury), 0);
+        assertEq(staking.slash(validator, 5000), 0);
 
         vm.warp(block.timestamp + 7 days);
         vm.prank(alice);
@@ -434,56 +437,47 @@ contract NVNMStakingTest is NVNMStakingTestBase {
     function test_slash_paramValidation() public {
         vm.startPrank(slasher);
         vm.expectRevert(NVNMStaking.InvalidBps.selector);
-        staking.slash(validator, 0, treasury);
+        staking.slash(validator, 0);
         vm.expectRevert(NVNMStaking.InvalidBps.selector);
-        staking.slash(validator, 10_001, treasury);
-        vm.expectRevert(NVNMStaking.ZeroAddress.selector);
-        staking.slash(validator, 1000, address(0));
+        staking.slash(validator, 10_001);
         vm.stopPrank();
     }
 
     function test_slash_closedUntilTheElection() public {
         // A bond posted during the PoA phases is not at risk until Phase 5.
         _openRegistration(50 ether);
-        nvnm.mint(validator, 50 ether);
-        vm.startPrank(validator);
-        nvnm.approve(address(staking), 50 ether);
-        staking.registerCandidate();
-        vm.stopPrank();
+        _bond(validator, 50 ether);
 
         vm.prank(slasher);
         vm.expectRevert(NVNMStaking.SlashingClosed.selector);
-        staking.slash(validator, 10_000, treasury);
+        staking.slash(validator, 10_000);
 
         _startElection();
         vm.prank(slasher);
-        assertEq(staking.slash(validator, 10_000, treasury), 50 ether);
+        assertEq(staking.slash(validator, 10_000), 50 ether);
     }
 
     function test_slash_seizesCandidacyBond() public {
         _openRegistration(50 ether);
-        nvnm.mint(validator, 50 ether);
-        vm.startPrank(validator);
-        nvnm.approve(address(staking), 50 ether);
-        staking.registerCandidate();
-        vm.stopPrank();
+        _bond(validator, 50 ether);
         _stake(alice, validator, 100 ether);
         _startElection();
 
         vm.prank(slasher);
-        uint256 seized = staking.slash(validator, 5000, treasury);
+        uint256 seized = staking.slash(validator, 5000);
         assertEq(seized, 25 ether, "half the acquired bond only");
         assertEq(staking.bondOf(validator), 25 ether);
         assertEq(staking.stakedOf(validator, alice), 100 ether, "delegators untouched");
 
         vm.prank(slasher);
-        staking.slash(validator, 10_000, treasury); // rest of the bond
+        staking.slash(validator, 10_000); // rest of the bond
         assertEq(staking.bondOf(validator), 0);
 
-        uint256 before = nvnm.balanceOf(validator);
+        assertEq(gateway.seized(validator), 50 ether);
         vm.prank(validator);
         staking.resignCandidate();
-        assertEq(nvnm.balanceOf(validator), before, "already-seized bond is not refunded");
+        (uint256 pending,) = staking.pendingBondOf(validator);
+        assertEq(pending, 0, "already-seized bond is not returned");
     }
 
     function test_slash_reducesElectionSeats() public {
@@ -495,7 +489,7 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         _stake(alice, validator, 300 ether);
 
         vm.prank(slasher);
-        staking.slash(validator, 10_000, treasury); // bond is 0; still elected on delegated
+        staking.slash(validator, 10_000); // bond is 0; still elected on delegated
         address[] memory vals = _committee();
         assertEq(vals[0], validator);
     }
@@ -532,23 +526,17 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     function _fillCandidates() internal {
         _openRegistration(1 ether);
         for (uint256 i; i < 256; ++i) {
-            address c = address(uint160(0x10000 + i));
-            nvnm.mint(c, 1 ether);
-            vm.startPrank(c);
-            nvnm.approve(address(staking), 1 ether);
-            staking.registerCandidate();
-            vm.stopPrank();
+            _bond(address(uint160(0x10000 + i)), 1 ether);
         }
     }
 
     function test_candidacy_registrationCapped() public {
         _fillCandidates();
-        nvnm.mint(alice, 1 ether);
-        vm.startPrank(alice);
-        nvnm.approve(address(staking), 1 ether);
+        _bond(alice, 1 ether);
+        assertEq(staking.bondOf(alice), 1 ether, "held, though it cannot stand");
+        vm.prank(alice);
         vm.expectRevert(NVNMStaking.CandidateListFull.selector);
         staking.registerCandidate();
-        vm.stopPrank();
     }
 
     function test_candidacy_ownerCurationCapped() public {
@@ -588,11 +576,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         staking.setCandidacyBond(50 ether);
         staking.setCommitteeConfig(21, 10, 0); // acquired counts 10x
         vm.stopPrank();
-        nvnm.mint(validator2, 50 ether);
-        vm.startPrank(validator2);
-        nvnm.approve(address(staking), 50 ether);
-        staking.registerCandidate();
-        vm.stopPrank();
+        _bond(validator2, 50 ether);
         _stake(alice, validator, 400 ether); // weight 400
         // validator2: 50*10 + 0 = 500 > 400, ranks first despite less delegated.
         address[] memory vals = _committee();
@@ -607,11 +591,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         staking.setCandidacyBond(50 ether);
         staking.setCommitteeConfig(1, 10, 0); // one seat; acquired counts 10x
         vm.stopPrank();
-        nvnm.mint(validator2, 50 ether);
-        vm.startPrank(validator2);
-        nvnm.approve(address(staking), 50 ether);
-        staking.registerCandidate();
-        vm.stopPrank();
+        _bond(validator2, 50 ether);
         _stake(alice, validator, 400 ether);
         _stake(bob, makeAddr("notACandidate"), 100 ether);
         vm.prank(owner);
@@ -763,8 +743,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         staking.setCandidacyBond(50 ether);
         staking.setCommitteeConfig(21, type(uint256).max, 0);
         vm.stopPrank();
-        vm.prank(alice);
-        staking.registerCandidate(); // 50e18 bond x 2^256-1 weight overflows unchecked math
+        _bond(alice, 50 ether); // 50e18 bond x 2^256-1 weight overflows unchecked math
 
         address[] memory vals = _committee();
         assertEq(vals.length, 1);
@@ -812,18 +791,19 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         staking.setUnbondingPeriod(1 days);
         vm.expectRevert(Ownable.Unauthorized.selector);
         staking.setRewardDuration(1 hours);
+        vm.expectRevert(Ownable.Unauthorized.selector);
+        staking.setBondGateway(address(0));
         vm.stopPrank();
     }
 
     // -- bonded candidacy ----------------------------------------------------
-    function test_candidacy_registerWithBond() public {
+    function test_candidacy_aBridgedBondStands() public {
         _openRegistration(50 ether);
 
-        vm.prank(alice);
-        staking.registerCandidate();
+        _bond(alice, 50 ether);
         assertTrue(staking.candidates().length == 1 && staking.candidates()[0] == alice);
         assertEq(staking.bondOf(alice), 50 ether);
-        assertEq(nvnm.balanceOf(alice), 950 ether);
+        assertEq(nvnm.balanceOf(alice), 1000 ether, "never taken from her balance here");
 
         // Electable like any curated candidate.
         vm.prank(owner);
@@ -848,8 +828,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.stopPrank();
 
         _openRegistration(50 ether);
-        vm.prank(alice);
-        staking.registerCandidate();
+        _bond(alice, 50 ether);
 
         vm.startPrank(owner);
         vm.expectRevert(NVNMStaking.UnbondingRequired.selector);
@@ -875,17 +854,16 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         staking.setUnbondingPeriod(7 days);
         staking.setCandidacyBond(50 ether);
         vm.stopPrank();
-        vm.startPrank(alice);
-        staking.registerCandidate();
+        _bond(alice, 50 ether);
+        vm.prank(alice);
         staking.resignCandidate();
-        vm.stopPrank();
     }
 
     function test_candidacy_resignUnbondsBond() public {
         _resignUnderUnbonding();
 
         assertEq(staking.candidates().length, 0, "candidacy ends immediately");
-        assertEq(nvnm.balanceOf(alice), 950 ether, "bond is not refunded yet");
+        assertEq(gateway.returned(alice), 0, "bond is not returned yet");
         (uint256 amount, uint256 releaseAt) = staking.pendingBondOf(alice);
         assertEq(amount, 50 ether);
         assertEq(releaseAt, block.timestamp + 7 days);
@@ -897,7 +875,8 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.warp(block.timestamp + 7 days);
         vm.prank(alice);
         assertEq(staking.withdrawBond(), 50 ether);
-        assertEq(nvnm.balanceOf(alice), 1000 ether);
+        assertEq(gateway.returned(alice), 50 ether, "home to her bond on Ethereum");
+        assertEq(gateway.feePayer(), alice, "she pays the bridge");
         (amount, releaseAt) = staking.pendingBondOf(alice);
         assertEq(amount + releaseAt, 0, "bucket cleared");
     }
@@ -909,28 +888,24 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         _startElection();
 
         vm.prank(slasher);
-        assertEq(staking.slash(alice, 10_000, treasury), 50 ether, "resigned bond still slashable");
-        assertEq(nvnm.balanceOf(treasury), 50 ether);
+        assertEq(staking.slash(alice, 10_000), 50 ether, "resigned bond still slashable");
+        assertEq(gateway.seized(alice), 50 ether);
 
         vm.warp(block.timestamp + 7 days);
         vm.prank(alice);
         assertEq(staking.withdrawBond(), 0);
-        assertEq(nvnm.balanceOf(alice), 950 ether, "nothing left to withdraw");
+        assertEq(gateway.returned(alice), 0, "nothing left to return");
     }
 
-    function test_candidacy_cannotReRegisterWhileBondUnbonding() public {
+    function test_candidacy_reRegisteringCancelsTheUnbonding() public {
+        // The bond never left, so standing again needs no fresh one.
         _resignUnderUnbonding();
 
         vm.prank(alice);
-        vm.expectRevert(NVNMStaking.StillUnbonding.selector);
         staking.registerCandidate();
-
-        vm.warp(block.timestamp + 7 days);
-        vm.startPrank(alice);
-        staking.withdrawBond();
-        staking.registerCandidate(); // clean slate: a fresh bond is posted
-        vm.stopPrank();
-        assertEq(staking.bondOf(alice), 50 ether);
+        (uint256 amount, uint256 releaseAt) = staking.pendingBondOf(alice);
+        assertEq(amount + releaseAt, 0, "no longer unbonding");
+        assertEq(staking.candidates()[0], alice);
     }
 
     function test_election_minAcquiredExcludesUnbondedCandidates() public {
@@ -949,9 +924,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         assertEq(vals.length, 0, "no bond, no seat");
 
         // Posting the bond makes the same validator electable.
-        nvnm.mint(bob, 50 ether);
-        vm.prank(bob);
-        staking.registerCandidate();
+        _bond(bob, 50 ether);
         vals = _committee();
         assertEq(vals.length, 1);
         assertEq(vals[0], bob);
@@ -1021,8 +994,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
 
     function test_candidacy_ownerKickUnbondsBond() public {
         _openRegistration(50 ether);
-        vm.prank(alice);
-        staking.registerCandidate();
+        _bond(alice, 50 ether);
 
         vm.prank(owner);
         staking.setCandidate(alice, false);
@@ -1032,13 +1004,12 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.warp(block.timestamp + 7 days);
         vm.prank(alice);
         staking.withdrawBond();
-        assertEq(nvnm.balanceOf(alice), 1000 ether);
+        assertEq(gateway.returned(alice), 50 ether);
     }
 
     function test_candidacy_bondChangeDoesNotAffectHeldBonds() public {
         _openRegistration(50 ether);
-        vm.prank(alice);
-        staking.registerCandidate();
+        _bond(alice, 50 ether);
 
         vm.prank(owner);
         staking.setCandidacyBond(500 ether); // raise after alice registered
@@ -1051,8 +1022,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
 
     function test_candidacy_duplicateAndNonCandidateRevert() public {
         _openRegistration(50 ether);
-        vm.prank(alice);
-        staking.registerCandidate();
+        _bond(alice, 50 ether);
 
         vm.prank(alice);
         vm.expectRevert(NVNMStaking.AlreadyCandidate.selector);
@@ -1061,6 +1031,52 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.prank(bob);
         vm.expectRevert(NVNMStaking.NotCandidate.selector);
         staking.resignCandidate();
+    }
+
+    function test_bondFromBridge_onlyTheGateway() public {
+        vm.prank(alice);
+        vm.expectRevert(NVNMStaking.NotBondGateway.selector);
+        staking.bondFromBridge(alice, 50 ether);
+    }
+
+    function test_candidacy_aBondBelowTheBarStandsOnceItReachesIt() public {
+        _openRegistration(50 ether);
+        _bond(alice, 30 ether);
+        assertEq(staking.candidates().length, 0, "not yet");
+        vm.prank(alice);
+        vm.expectRevert(NVNMStaking.BondTooSmall.selector);
+        staking.registerCandidate();
+
+        _bond(alice, 20 ether);
+        assertEq(staking.candidates()[0], alice);
+        assertEq(staking.bondOf(alice), 50 ether);
+    }
+
+    function test_candidacy_aBondArrivesEvenWhenItCannotStand() public {
+        // It is already locked on Ethereum: a delivery that reverted would leave it there unrecorded.
+        vm.prank(owner);
+        staking.setUnbondingPeriod(7 days);
+        _bond(bob, 50 ether); // candidacy closed
+        assertEq(staking.bondOf(bob), 50 ether);
+        assertEq(staking.candidates().length, 0);
+
+        _resignUnderUnbonding();
+        _bond(alice, 10 ether);
+        (uint256 amount, uint256 releaseAt) = staking.pendingBondOf(alice);
+        assertEq(amount, 60 ether, "joins the unbonding bond");
+        assertGt(releaseAt, 0, "without standing her again");
+    }
+
+    function test_candidacy_aBondThatNeverStoodGoesHome() public {
+        _openRegistration(50 ether);
+        _bond(alice, 10 ether);
+
+        vm.prank(alice);
+        staking.resignCandidate();
+        vm.warp(block.timestamp + 7 days);
+        vm.prank(alice);
+        assertEq(staking.withdrawBond(), 10 ether);
+        assertEq(gateway.returned(alice), 10 ether);
     }
 }
 
