@@ -224,6 +224,16 @@ contract FeeRouterTest is Test {
         factory.create(validator, operator, 501);
     }
 
+    /// @dev The registry precompile reads `routerOf` straight from slot 4.
+    function test_factory_recordsEachValidatorsLatestRouter() public {
+        assertEq(factory.routerOf(validator), address(router));
+        address again = factory.create(validator, operator, 2000);
+        assertEq(factory.routerOf(validator), again, "the latest one");
+        assertTrue(factory.isRouter(address(router)), "the earlier one stays a router");
+        bytes32 slot = keccak256(abi.encode(validator, uint256(4)));
+        assertEq(address(uint160(uint256(vm.load(address(factory), slot)))), again);
+    }
+
     function test_flush_buybackSwapsToSink() public {
         MockSwapPool pool = new MockSwapPool(address(usd), address(nvnm));
         usd.mint(address(pool), 1000 ether);
