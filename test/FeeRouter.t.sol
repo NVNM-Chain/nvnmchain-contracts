@@ -90,11 +90,17 @@ contract FeeRouterTest is Test {
         lockbox = new FeeLockbox(owner, 2500, 2500, 1 days);
         factory = new FeeRouterFactory(address(staking), address(lockbox), owner, 10_000, treasury);
         sink = factory.BUYBACK_SINK();
-        router = FeeRouter(factory.create(validator, operator, 1000)); // 10% of validator remainder
+        router = FeeRouter(_create(validator, operator, 1000)); // 10% of validator remainder
 
         nvnm.mint(alice, 1000 ether);
         vm.prank(alice);
         nvnm.approve(address(staking), type(uint256).max);
+    }
+
+    /// @dev As the owner: only it or the validator may create a router.
+    function _create(address v, address op, uint256 bps) internal returns (address) {
+        vm.prank(owner);
+        return factory.create(v, op, bps);
     }
 
     function _stake(uint256 amount) internal {
@@ -147,7 +153,7 @@ contract FeeRouterTest is Test {
     function test_flush_defersTheDelegatorShareToo() public {
         // A 0% router over a pool its operator staked would otherwise pay out before commencement.
         _stake(100 ether);
-        FeeRouter zero = FeeRouter(factory.create(validator, operator, 0));
+        FeeRouter zero = FeeRouter(_create(validator, operator, 0));
         usd.mint(address(zero), 100 ether);
 
         assertEq(zero.flush(), 0, "nothing reaches the pool");
@@ -157,7 +163,7 @@ contract FeeRouterTest is Test {
     }
 
     function test_flush_phase1_threeWayWithNoStakers() public {
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000)); // whole validator remainder
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000)); // whole validator remainder
         usd.mint(address(r), 100 ether);
 
         assertEq(r.flush(), 0);
@@ -170,7 +176,7 @@ contract FeeRouterTest is Test {
         _commence();
         _stake(100 ether);
         // 20% commission of the 50% validator remainder = 10% of gross.
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 2000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 2000));
         usd.mint(address(r), 100 ether);
 
         assertEq(r.flush(), 40 ether);
@@ -202,11 +208,11 @@ contract FeeRouterTest is Test {
     function test_flush_commissionExtremes() public {
         _commence();
         _stake(1 ether);
-        FeeRouter zero = FeeRouter(factory.create(validator, operator, 0));
+        FeeRouter zero = FeeRouter(_create(validator, operator, 0));
         usd.mint(address(zero), 50 ether);
         assertEq(zero.flush(), 25 ether);
 
-        FeeRouter all = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter all = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(all), 50 ether);
         assertEq(all.flush(), 0);
         assertEq(usd.balanceOf(operator), 25 ether, "the whole remainder after the cuts");
@@ -217,9 +223,9 @@ contract FeeRouterTest is Test {
         factory.setMaxCommission(2000);
 
         vm.expectRevert(FeeRouterFactory.CommissionTooHigh.selector);
-        factory.create(validator, operator, 2001);
+        _create(validator, operator, 2001);
 
-        factory.create(validator, operator, 2000);
+        _create(validator, operator, 2000);
 
         vm.prank(makeAddr("stranger"));
         vm.expectRevert(Ownable.Unauthorized.selector);
@@ -228,13 +234,25 @@ contract FeeRouterTest is Test {
         vm.prank(owner);
         factory.setMaxCommission(500);
         vm.expectRevert(FeeRouterFactory.CommissionTooHigh.selector);
-        factory.create(validator, operator, 501);
+        _create(validator, operator, 501);
+    }
+
+    function test_create_isForTheValidatorOrTheOwner() public {
+        address stranger = makeAddr("stranger");
+        vm.prank(stranger);
+        vm.expectRevert(Ownable.Unauthorized.selector);
+        factory.create(validator, stranger, 2000);
+        assertEq(factory.routerOf(validator), address(router));
+
+        vm.prank(validator);
+        address own = factory.create(validator, operator, 500);
+        assertEq(factory.routerOf(validator), own);
     }
 
     /// @dev The registry precompile reads `routerOf` straight from slot 4.
     function test_factory_recordsEachValidatorsLatestRouter() public {
         assertEq(factory.routerOf(validator), address(router));
-        address again = factory.create(validator, operator, 2000);
+        address again = _create(validator, operator, 2000);
         assertEq(factory.routerOf(validator), again, "the latest one");
         assertTrue(factory.isRouter(address(router)), "the earlier one stays a router");
         bytes32 slot = keccak256(abi.encode(validator, uint256(4)));
@@ -248,7 +266,7 @@ contract FeeRouterTest is Test {
         vm.prank(owner);
         factory.setSwapper(address(pool), SWAP_GAS);
 
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
 
         uint256 expectedOut = (uint256(1000 ether) * 25 ether) / uint256(1025 ether);
@@ -267,7 +285,7 @@ contract FeeRouterTest is Test {
         vm.prank(owner);
         factory.setSwapper(swapper, SWAP_GAS);
 
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
 
         vm.expectEmit(true, false, false, true, address(r));
@@ -292,7 +310,7 @@ contract FeeRouterTest is Test {
         vm.prank(owner);
         factory.setSwapper(address(pool), SWAP_GAS);
 
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
         vm.expectRevert(FeeRouter.SwapUnderfunded.selector);
         r.flush{gas: SWAP_GAS / 2}();
@@ -303,7 +321,7 @@ contract FeeRouterTest is Test {
         vm.prank(owner);
         factory.setSwapper(swapper, SWAP_GAS);
 
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
         vm.expectEmit(true, false, false, true, address(r));
         emit FeeRouter.BuybackSwapFailed(swapper, 25 ether);
@@ -317,7 +335,7 @@ contract FeeRouterTest is Test {
         BudgetRecordingSwapper swapper = new BudgetRecordingSwapper();
         vm.prank(owner);
         factory.setSwapper(address(swapper), SWAP_GAS);
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
 
         for (uint256 limit = SWAP_GAS; limit < 2 * SWAP_GAS; limit += 1000) {
@@ -338,7 +356,7 @@ contract FeeRouterTest is Test {
 
     function test_flush_retriesTheHeldBuybackWithinTheSwapperCap() public {
         // Unset, the cut waits on the router; later flushes swap it, at most a cap per swap.
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
         r.flush();
         assertEq(r.heldForBuyback(address(usd)), 25 ether);
@@ -361,7 +379,7 @@ contract FeeRouterTest is Test {
         // than the pool's reward token: the cuts are still owed, and flushing only
         // `rewardToken` would leave them unpaid.
         MockERC20 other = new MockERC20("otherUSD", "otherUSD");
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         other.mint(address(r), 100 ether);
 
         r.flush(address(other));
@@ -438,7 +456,7 @@ contract FeeRouterTest is Test {
         factory.setSwapper(swapper, SWAP_GAS);
 
         MockERC20 other = new MockERC20("otherUSD", "otherUSD");
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         other.mint(address(r), 100 ether);
         r.flush(address(other)); // would emit BuybackSwapFailed if it had tried to swap
 
@@ -447,7 +465,7 @@ contract FeeRouterTest is Test {
     }
 
     function test_flush_defaultsToTheRewardToken() public {
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
         r.flush();
         assertEq(usd.balanceOf(treasury), 25 ether);
@@ -488,7 +506,7 @@ contract FeeRouterTest is Test {
         vm.prank(owner);
         factory.setSwapper(address(pool), SWAP_GAS);
 
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(r), 2); // 25% of 2 = 0 after truncation
         assertEq(r.flush(), 0);
         assertEq(lockbox.owed(address(usd), operator), 2);
@@ -508,8 +526,8 @@ contract FeeRouterTest is Test {
 
     function test_factory_isDeterministicPerParams() public {
         vm.expectRevert();
-        factory.create(validator, operator, 1000);
-        address other = factory.create(validator, operator, 2000);
+        _create(validator, operator, 1000);
+        address other = _create(validator, operator, 2000);
         assertTrue(other != address(router));
         assertEq(FeeRouter(other).commissionBps(), 2000);
         assertEq(FeeRouter(other).rewardToken(), address(usd));
@@ -535,7 +553,7 @@ contract FeeRouterTest is Test {
         vm.warp(block.timestamp + 1 days);
         lockbox.applySplit(id);
 
-        FeeRouter r = FeeRouter(factory.create(validator, operator, 10_000));
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
         usd.mint(address(r), 100 ether);
         r.flush();
         assertEq(usd.balanceOf(treasury), 20 ether);

@@ -18,9 +18,9 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 ///      being walked down, since alone it decays with the price it guards.
 ///
 ///      `swap` is routers-only because moving the EMA is otherwise near-free: a direct caller,
-///      the owner included, keeps the output, where a router's goes to the buyback sink. Router
-///      creation is permissionless, so the gate makes that costly rather than impossible. It is
-///      also guarded: the inner market runs before the EMA moves, and a market re-entering
+///      the owner included, keeps the output, where a router's goes to the buyback sink. Anyone
+///      may create a router for itself, so the gate makes that costly rather than impossible. It
+///      is also guarded: the inner market runs before the EMA moves, and a market re-entering
 ///      through another router would otherwise be judged against the stale price.
 contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
     uint256 private constant WAD = 1e18;

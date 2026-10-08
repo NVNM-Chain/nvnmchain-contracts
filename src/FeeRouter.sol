@@ -286,7 +286,14 @@ contract FeeRouterFactory is Ownable {
         return (devshare, BUYBACK_SINK, devBps, buyBps, swapper, swapGas);
     }
 
+    /// @notice A router for `validator`, from now on the one the registry takes for it. Only the
+    ///         validator or the owner: a router names who is paid the operator share. The owner
+    ///         keeps the right so a seat that never routes can be made to take the cuts, and in
+    ///         doing so names that seat's operator. Deployed under the registry's owner, which
+    ///         can unseat the validator outright, that adds nothing to what it is trusted with;
+    ///         nothing here ties the two, and under another owner it is a power of its own.
     function create(address validator, address operator, uint256 commissionBps) external returns (address router) {
+        if (msg.sender != validator && msg.sender != owner()) revert Unauthorized();
         if (commissionBps > maxCommissionBps) revert CommissionTooHigh();
         bytes32 salt = keccak256(abi.encode(validator, operator, commissionBps));
         router = address(new FeeRouter{salt: salt}(validator, operator, staking, address(this), commissionBps));
