@@ -85,8 +85,9 @@ contract FeeRouter is ReentrancyGuard {
     }
 
     /// @notice Have FeeManager pay this router in the pool's reward token, which `flush` deposits
-    ///         and swaps; unset, it pays the chain's default token. Permissionless, and again after
-    ///         a reward-token migration. FeeManager refuses it in this router's own blocks.
+    ///         and swaps; unset, it pays the chain's default token. The factory calls it at
+    ///         creation; anyone may again after a reward-token migration, outside this router's
+    ///         own blocks, where FeeManager refuses it.
     function setValidatorToken() external {
         FEE_MANAGER.setValidatorToken(rewardToken());
     }
@@ -289,6 +290,8 @@ contract FeeRouterFactory is Ownable {
         if (commissionBps > maxCommissionBps) revert CommissionTooHigh();
         bytes32 salt = keccak256(abi.encode(validator, operator, commissionBps));
         router = address(new FeeRouter{salt: salt}(validator, operator, staking, address(this), commissionBps));
+        // Now, while no block pays it yet: FeeManager refuses the change in a router's own blocks.
+        FeeRouter(router).setValidatorToken();
         isRouter[router] = true;
         routerOf[validator] = router;
         emit RouterCreated(validator, router, operator, commissionBps);

@@ -79,8 +79,10 @@ contract FeeRouterTest is Test {
     address alice = makeAddr("alice");
     address treasury = makeAddr("devshare");
     address sink;
+    address constant FEE_MANAGER = 0xfeEC000000000000000000000000000000000000;
 
     function setUp() public {
+        vm.etch(FEE_MANAGER, address(new MockFeeManager()).code);
         nvnm = new MockERC20("NVNM", "NVNM");
         usd = new MockERC20("nUSD", "nUSD");
         staking = NVNMStaking(LibClone.deployERC1967(address(new NVNMStaking())));
@@ -179,12 +181,17 @@ contract FeeRouterTest is Test {
         assertApproxEqAbs(staking.earned(validator, alice), 40 ether, 1);
     }
 
-    function test_setValidatorToken_asksForTheRewardToken() public {
-        address feeManager = address(router.FEE_MANAGER());
-        vm.etch(feeManager, address(new MockFeeManager()).code);
+    function test_create_asksForFeesInTheRewardToken() public view {
+        assertEq(address(router.FEE_MANAGER()), FEE_MANAGER);
+        assertEq(MockFeeManager(FEE_MANAGER).validatorTokens(address(router)), address(usd));
+    }
+
+    function test_setValidatorToken_isPermissionless() public {
+        vm.prank(address(router));
+        MockFeeManager(FEE_MANAGER).setValidatorToken(address(0)); // as if the reward token had moved
         vm.prank(makeAddr("keeper"));
         router.setValidatorToken();
-        assertEq(MockFeeManager(feeManager).validatorTokens(address(router)), address(usd));
+        assertEq(MockFeeManager(FEE_MANAGER).validatorTokens(address(router)), address(usd));
     }
 
     function test_flush_zeroBalanceIsNoop() public {
