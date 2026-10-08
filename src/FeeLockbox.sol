@@ -16,7 +16,9 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 ///         the validator share.
 /// @dev The owner declares each validator affiliated or not, once, and commencement waits until
 ///      every active one is declared. The set is read from the registry at each count, so a
-///      removed validator's vote stops counting. Commencement is permanent.
+///      removed validator's vote stops counting, and every record is a seat's, a registry entry
+///      held by an address: a newcomer given a departed validator's address, or a seat handed to
+///      a new address, starts with none. Commencement is permanent.
 contract FeeLockbox is Ownable, ReentrancyGuard {
     IValidatorConfigV2 public constant REGISTRY = IValidatorConfigV2(0xCcCCCCcC00000000000000000000000000000001);
     /// @notice The least share of gross fees the buyback cut may take.
@@ -33,13 +35,13 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
     uint128 public devshareBps;
     uint128 public buybackBps;
     Split[] public splits;
-    mapping(uint256 => mapping(address => uint64)) public backedSince; // proposal => validator => time, 0 = not
+    mapping(uint256 => mapping(bytes32 => uint64)) public backedSince; // proposal => seat => time, 0 = not
 
     bool public commenced;
     uint256 public splitsBeforeCommencement; // proposals below this id were voted under the old rules
-    mapping(address => bool) public declared; // validator => its affiliation is on record
-    mapping(address => bool) public affiliated; // validator => affiliated with the founding parties
-    mapping(address => bool) public voted; // validator => votes to commence
+    mapping(bytes32 => bool) public declared; // seat => its affiliation is on record
+    mapping(bytes32 => bool) public affiliated; // seat => affiliated with the founding parties
+    mapping(bytes32 => bool) public voted; // seat => votes to commence
     mapping(address => mapping(address => uint256)) public owed; // token => operator => deferred
 
     event Deposited(address indexed token, address indexed operator, uint256 amount);
@@ -98,19 +100,19 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
         emit Paid(token, operator, amount);
     }
 
-    /// @notice Declare whether `validator` is affiliated with the founding parties. Final.
+    /// @notice Declare whether the active validator `validator` is affiliated with the founding
+    ///         parties. Final for that seat.
     function setAffiliated(address validator, bool affiliated_) external onlyOwner {
-        if (validator == address(0)) revert ZeroAddress();
-        if (declared[validator]) revert AlreadyDeclared();
-        declared[validator] = true;
-        affiliated[validator] = affiliated_;
+        bytes32 s = _seat(_active(validator));
+        if (declared[s]) revert AlreadyDeclared();
+        declared[s] = true;
+        affiliated[s] = affiliated_;
         emit Affiliated(validator, affiliated_);
     }
 
     /// @notice An active validator's vote to commence distribution.
     function vote(bool support) external {
-        if (!_isActive(msg.sender)) revert NotValidator();
-        voted[msg.sender] = support;
+        voted[_seat(_active(msg.sender))] = support;
         emit Voted(msg.sender, support);
     }
 
@@ -137,31 +139,36 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
         IValidatorConfigV2.Validator[] memory set = REGISTRY.getActiveValidators();
         active = set.length;
         for (uint256 i; i < active; ++i) {
-            address v = set[i].validatorAddress;
-            if (!declared[v]) ++undeclared;
-            if (affiliated[v]) ++affiliatedCount;
-            if (voted[v]) ++votes;
+            bytes32 s = _seat(set[i]);
+            if (!declared[s]) ++undeclared;
+            if (affiliated[s]) ++affiliatedCount;
+            if (voted[s]) ++votes;
         }
+    }
+
+    /// @notice The key a seat's records live under: registry entry `index` held by `validator`.
+    function seat(uint64 index, address validator) public pure returns (bytes32) {
+        return keccak256(abi.encode(index, validator));
     }
 
     // -- the fee split -------------------------------------------------------
     /// @notice Propose a split, as an active validator, who thereby backs it.
     function proposeSplit(uint256 devBps, uint256 buyBps) external returns (uint256 id) {
-        if (!_isActive(msg.sender)) revert NotValidator();
+        bytes32 s = _seat(_active(msg.sender));
         _checkSplit(devBps, buyBps);
         id = splits.length;
         // Narrowed after `_checkSplit`: both ratios fit.
         splits.push(Split({devBps: uint16(devBps), buyBps: uint16(buyBps), applied: false}));
-        backedSince[id][msg.sender] = uint64(block.timestamp);
+        backedSince[id][s] = uint64(block.timestamp);
         emit SplitProposed(id, msg.sender, devBps, buyBps);
     }
 
     /// @notice An active validator's vote on split proposal `id`. Backing again keeps its start.
     function voteSplit(uint256 id, bool support) external {
-        if (!_isActive(msg.sender)) revert NotValidator();
+        bytes32 s = _seat(_active(msg.sender));
         if (id >= splits.length) revert NoSuchSplit();
-        if (!support) backedSince[id][msg.sender] = 0;
-        else if (backedSince[id][msg.sender] == 0) backedSince[id][msg.sender] = uint64(block.timestamp);
+        if (!support) backedSince[id][s] = 0;
+        else if (backedSince[id][s] == 0) backedSince[id][s] = uint64(block.timestamp);
         emit SplitVoted(id, msg.sender, support);
     }
 
@@ -195,7 +202,7 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
         IValidatorConfigV2.Validator[] memory set = REGISTRY.getActiveValidators();
         active = set.length;
         for (uint256 i; i < active; ++i) {
-            uint256 since = backedSince[id][set[i].validatorAddress];
+            uint256 since = backedSince[id][_seat(set[i])];
             if (since == 0) continue;
             ++backers;
             if (block.timestamp >= since + splitDelay) ++settled;
@@ -212,11 +219,16 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
         if (buyBps < MIN_BUYBACK_BPS) revert BuybackBelowFloor();
     }
 
-    function _isActive(address who) private view returns (bool) {
+    function _seat(IValidatorConfigV2.Validator memory v) private pure returns (bytes32) {
+        return seat(v.index, v.validatorAddress);
+    }
+
+    /// @dev `who`'s active registry entry.
+    function _active(address who) private view returns (IValidatorConfigV2.Validator memory) {
         IValidatorConfigV2.Validator[] memory set = REGISTRY.getActiveValidators();
         for (uint256 i; i < set.length; ++i) {
-            if (set[i].validatorAddress == who) return true;
+            if (set[i].validatorAddress == who) return set[i];
         }
-        return false;
+        revert NotValidator();
     }
 }

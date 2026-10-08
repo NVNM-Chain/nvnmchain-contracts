@@ -30,12 +30,19 @@ contract FeeLockboxTest is Test {
         delete vals;
         for (uint256 i; i < n; ++i) {
             vals.push(address(uint160(0x1000 + i)));
-            if (!lockbox.declared(vals[i])) {
+        }
+        registry.setActive(vals);
+        for (uint256 i; i < n; ++i) {
+            if (!lockbox.declared(_seat(vals[i]))) {
                 vm.prank(owner);
                 lockbox.setAffiliated(vals[i], i < affiliatedCount);
             }
         }
-        registry.setActive(vals);
+    }
+
+    /// @dev The seat of an address in the set.
+    function _seat(address v) internal view returns (bytes32) {
+        return lockbox.seat(registry.indexOf(v), v);
     }
 
     function _votes(uint256 n) internal {
@@ -116,13 +123,36 @@ contract FeeLockboxTest is Test {
         _votes(5);
         // A validator replaced in the set takes its vote with it.
         vals[4] = address(uint160(0x2000));
+        registry.setActive(vals);
         vm.prank(owner);
         lockbox.setAffiliated(vals[4], false);
-        registry.setActive(vals);
         (,, uint256 votes,) = lockbox.composition();
         assertEq(votes, 4);
         vm.expectRevert(FeeLockbox.VoteShort.selector);
         lockbox.commence();
+    }
+
+    /// @dev The registry numbers a returning address as a new entry, and keeps an entry's number
+    ///      when it is handed to another address: either way the records start over.
+    function test_records_belongToTheSeat_notTheAddress() public {
+        _set(5, 0);
+        _votes(5);
+        address reused = vals[4];
+        vals.pop();
+        registry.setActive(vals);
+        vals.push(reused);
+        registry.setActive(vals);
+        (uint256 active,, uint256 votes, uint256 undeclared) = lockbox.composition();
+        assertEq(active, 5);
+        assertEq(votes, 4, "the returning address has not voted");
+        assertEq(undeclared, 1, "nor been declared");
+        vm.prank(owner);
+        lockbox.setAffiliated(reused, true);
+
+        registry.transfer(0, address(uint160(0x3000)));
+        (,, votes, undeclared) = lockbox.composition();
+        assertEq(votes, 3, "the new holder has not voted");
+        assertEq(undeclared, 1, "nor been declared");
     }
 
     function test_vote_canBeWithdrawn() public {
@@ -148,20 +178,22 @@ contract FeeLockboxTest is Test {
         lockbox.commence();
     }
 
-    function test_setAffiliated_ownerOnlyAndFinal() public {
+    function test_setAffiliated_ownerOnly_activeOnly_andFinal() public {
+        vals.push(makeAddr("validator"));
+        registry.setActive(vals);
         vm.prank(makeAddr("stranger"));
         vm.expectRevert(Ownable.Unauthorized.selector);
-        lockbox.setAffiliated(operator, true);
+        lockbox.setAffiliated(vals[0], true);
 
         vm.startPrank(owner);
-        vm.expectRevert(FeeLockbox.ZeroAddress.selector);
-        lockbox.setAffiliated(address(0), true);
-
+        vm.expectRevert(FeeLockbox.NotValidator.selector);
         lockbox.setAffiliated(operator, true);
+
+        lockbox.setAffiliated(vals[0], true);
         vm.expectRevert(FeeLockbox.AlreadyDeclared.selector);
-        lockbox.setAffiliated(operator, false);
+        lockbox.setAffiliated(vals[0], false);
         vm.stopPrank();
-        assertTrue(lockbox.affiliated(operator));
+        assertTrue(lockbox.affiliated(_seat(vals[0])));
     }
 
     function test_deposit_rejectsZeroOperator() public {
