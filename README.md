@@ -4,7 +4,7 @@ Application contracts for NVM, including its economics: the token, staking and t
 Only NVNMStaking is upgradeable (UUPS, owned by a timelock). FeeRouter, FeeRouterFactory,
 GuardedSwapper and BridgedNVNM change only through their owners' settings or a redeploy.
 If genesis sets `stakingElection` to the staking contract, the node picks each epoch's
-committee by calling its `computeCommittee(registry)`, and from NVNM1 draws block proposers by
+committee by calling its `computeCommittee(registry)`, and from T12 draws block proposers by
 `electionWeight`, the same score for any address, elected or not.
 
 ## Staking and fees
@@ -43,11 +43,11 @@ Each contract's own NatSpec carries the rest — why `flush` takes a token, why 
 floor is two-sided, why a departing bond stays slashable.
 
 Two things the phase plan needs that these contracts do not enforce: the registry owner
-must point each validator's `feeRecipient` at its router (from NVNM1 the node lets nobody
-else set it and pays blocks nowhere else), and the phase gates (TTM revenue, the 5 → 9 →
-15 → 21 ramp) are governance calls, not on-chain conditions. Through Phase 4 the ramp
-is registry adds, with `maxSeats` left at 0 so the node seats the registry; setting it
-is Phase 5, and it also opens slashing.
+must point each validator's `feeRecipient` at its router (from T12, where genesis names the
+factory as `feeRouterFactory`, the node lets nobody else set it and pays blocks nowhere
+else), and the phase gates (TTM revenue, the 5 → 9 → 15 → 21 ramp) are governance calls,
+not on-chain conditions. Through Phase 4 the ramp is registry adds, with `maxSeats` left at
+0 so the node seats the registry; setting it is Phase 5, and it also opens slashing.
 
 ### One pool or one per validator
 

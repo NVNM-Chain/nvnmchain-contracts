@@ -238,7 +238,7 @@ contract FeeRouterFactory is Ownable {
     address public swapper; // 0 = routers hold the buyback cut
     uint256 public swapGas; // what each buyback swap gets, whatever the flush caller sends
     /// @notice Each validator's latest router, the only fee recipient the node's registry takes
-    ///         for it from NVNM1. The precompile reads this mapping at slot 4; keep it there.
+    ///         for it from T12. The precompile reads this mapping at slot 4; keep it there.
     mapping(address validator => address router) public routerOf;
 
     event RouterCreated(address indexed validator, address router, address operator, uint256 commissionBps);
