@@ -34,7 +34,8 @@ contract FeeRouter is ReentrancyGuard {
     ///         flushable balance, or a permissionless re-flush would cut it again.
     mapping(address => uint256) public heldForDelegators;
     /// @notice Per token, the buyback cut not yet swapped, retried by every flush: unset swapper,
-    ///         a rejected swap, or a token the swapper does not take. Never forwarded unswapped.
+    ///         a rejected swap, or a token the swapper does not take. Never forwarded unswapped;
+    ///         a token that is not the reward token is never swapped, and leaves by `sweep`.
     mapping(address => uint256) public heldForBuyback;
     mapping(address => bool) private lockboxApproved; // token => standing allowance granted
 
@@ -209,14 +210,19 @@ contract FeeRouter is ReentrancyGuard {
         }
     }
 
-    /// @notice Factory-owner escape hatch for the escrowed delegator share, to be converted and
-    ///         deposited to the pool by hand. Nothing else: live fees are only ever routed by
-    ///         `flush`.
+    /// @notice Factory-owner escape hatch for what `flush` holds and cannot route, to be converted
+    ///         and sent on by hand: the escrowed delegator share to the pool, and the buyback cut
+    ///         of a token that is not the reward token, which no swap takes, to the sink. Nothing
+    ///         else: live fees are only ever routed by `flush`.
     function sweep(address token, address to) external nonReentrant returns (uint256 amount) {
         if (msg.sender != Ownable(factory).owner()) revert NotFactoryOwner();
         if (to == address(0)) revert ZeroAddress();
         amount = heldForDelegators[token];
         heldForDelegators[token] = 0;
+        if (token != rewardToken()) {
+            amount += heldForBuyback[token];
+            heldForBuyback[token] = 0;
+        }
         if (amount != 0) SafeTransferLib.safeTransfer(token, to, amount);
         emit Swept(token, to, amount);
     }

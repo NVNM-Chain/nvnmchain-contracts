@@ -432,21 +432,42 @@ contract FeeRouterTest is Test {
         assertEq(other.balanceOf(address(router)), 70 ether, "held shares intact");
     }
 
-    function test_sweep_clearsTheHeldDelegatorShare() public {
+    function test_sweep_clearsWhatIsHeldOfASecondToken() public {
         _commence();
         _stake(100 ether);
         MockERC20 other = new MockERC20("otherUSD", "otherUSD");
         other.mint(address(router), 100 ether);
         router.flush(address(other));
 
+        // The delegators' 45 and the buyback cut's 25, which no swap takes.
         vm.prank(owner);
-        assertEq(router.sweep(address(other), treasury), 45 ether);
+        assertEq(router.sweep(address(other), treasury), 70 ether);
         assertEq(router.heldForDelegators(address(other)), 0, "escrow follows the tokens out");
+        assertEq(router.heldForBuyback(address(other)), 0);
+        assertEq(other.balanceOf(address(router)), 0);
 
         // Fresh fees in that token flush normally again.
         other.mint(address(router), 100 ether);
         router.flush(address(other));
         assertEq(router.heldForDelegators(address(other)), 45 ether);
+        assertEq(router.heldForBuyback(address(other)), 25 ether);
+    }
+
+    function test_sweep_leavesTheRewardTokensBuybackCutForTheSwap() public {
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
+        usd.mint(address(r), 100 ether);
+        r.flush(); // no swapper yet: the cut waits
+
+        vm.prank(owner);
+        assertEq(r.sweep(address(usd), treasury), 0);
+        assertEq(r.heldForBuyback(address(usd)), 25 ether, "a later flush still swaps it");
+
+        // Once the pool pays in another token, no flush offers this one to a swapper again.
+        MockERC20 next = new MockERC20("nextUSD", "nextUSD");
+        vm.mockCall(address(staking), abi.encodeCall(NVNMStaking.rewardToken, ()), abi.encode(address(next)));
+        vm.prank(owner);
+        assertEq(r.sweep(address(usd), treasury), 25 ether);
+        assertEq(usd.balanceOf(address(r)), 0);
     }
 
     function test_flush_swapsOnlyTheRewardToken() public {
