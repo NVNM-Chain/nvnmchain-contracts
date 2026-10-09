@@ -33,7 +33,9 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   floor, `min(4, registry)`. Its timelock should outlast the 14-day unbonding cap, so
   delegators can leave before an upgrade lands. Slashing takes only the bond, once the
   election is configured, and is the `slasher`'s: a Safe without that delay, or a resigning
-  validator would withdraw its bond first.
+  validator would withdraw its bond first. `slashEquivocation` is anyone's instead, on
+  evidence the node's registry accepts that a validator's key signed conflicting votes,
+  once `setEquivocation` opens it.
 - **GuardedSwapper** — buyback-market wrapper: a per-swap size cap and a two-sided price
   floor, so a sandwiched pool makes the swap revert instead of donating the buyback. Only
   the factory's routers may swap, not the owner.

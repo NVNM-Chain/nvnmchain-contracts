@@ -3,6 +3,7 @@ pragma solidity ^0.8.23;
 
 import {BPS} from "./Constants.sol";
 import {IBondGateway} from "./interfaces/IBondGateway.sol";
+import {IEquivocation} from "./interfaces/IEquivocation.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {Initializable} from "solady/utils/Initializable.sol";
@@ -35,6 +36,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     uint256 private constant MAX_SEATS = 21; // the validator set's cap
     uint256 private constant MAX_UNBONDING = 14 days; // the longest exit; the owner's timelock waits longer
     uint256 private constant MAX_REWARD_DURATION = 30 days;
+    // The node's validator registry, which checks evidence of conflicting votes.
+    address private constant VALIDATOR_REGISTRY = 0xCcCCCCcC00000000000000000000000000000001;
 
     /// @dev An exiting stake bucket, cleared as a unit so the pair cannot drift apart.
     struct Unbonding {
@@ -89,6 +92,13 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         // The L1 bridge gateway: bonds arrive only through it and leave or are seized through it,
         // so each stays tied to its validator's bond on Ethereum.
         address bondGateway;
+        // Evidence slashing: what a round of conflicting votes costs a bond, 0 = closed, and
+        // for how many epochs evidence of it counts. A key pays once for a round, whatever
+        // address the registry holds it under by then. Both share the gateway's slot, which
+        // a slash reads anyway.
+        uint16 equivocationBps;
+        uint64 evidenceEpochs;
+        mapping(bytes32 key => mapping(uint256 round => bool)) punished; // round: epoch << 64 | view
     }
 
     // keccak256(abi.encode(uint256(keccak256("nvnm.staking.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -121,6 +131,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     event BondReceived(address indexed validator, uint256 amount, uint256 bond);
     event BondGatewaySet(address gateway);
     event Slashed(address indexed validator, uint256 bps, uint256 seized);
+    event EquivocationSet(uint256 bps, uint256 evidenceEpochs);
+    event Equivocated(address indexed validator, uint64 epoch, uint64 viewNumber);
 
     // -- errors --------------------------------------------------------------
     error ZeroAmount();
@@ -144,6 +156,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     error SlashingClosed();
     error NotBondGateway();
     error BondTooSmall();
+    error EvidenceExpired();
+    error AlreadySlashed();
+    error NothingToSlash();
 
     constructor() {
         _disableInitializers();
@@ -359,7 +374,33 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         if (bps == 0 || bps > BPS) revert InvalidBps();
         // The PoA phases have no validator-level slashing, bond or not.
         if ($.maxSeats == 0) revert SlashingClosed();
+        return _slash($, validator, bps);
+    }
 
+    /// @notice Slash `equivocationBps` of the bond of the validator whose consensus key signed
+    ///         the conflicting votes in `evidence`, as the node's registry reads it. Anyone may
+    ///         bring it: once for a key and round, and while the round is no more than
+    ///         `evidenceEpochs` old. With no bond to slash it reverts, and the round stays open
+    ///         for one that arrives in time. You pay the bridge's fee (see {IBondGateway}).
+    function slashEquivocation(bytes calldata evidence) external nonReentrant returns (uint256 seized) {
+        StakingStorage storage $ = _s();
+        uint256 bps = $.equivocationBps;
+        // Before asking the registry, which charges for the signatures it checks.
+        if (bps == 0 || $.maxSeats == 0) revert SlashingClosed();
+        (address validator, uint64 epoch, uint64 viewNumber, uint64 epochsAgo) =
+            IEquivocation(VALIDATOR_REGISTRY).equivocator(evidence);
+        if (epochsAgo > $.evidenceEpochs) revert EvidenceExpired();
+        // The registry accepted the evidence, so it opens with the key that signed.
+        mapping(uint256 => bool) storage punished = $.punished[bytes32(evidence[:32])];
+        uint256 round = uint256(epoch) << 64 | viewNumber;
+        if (punished[round]) revert AlreadySlashed();
+        punished[round] = true;
+        emit Equivocated(validator, epoch, viewNumber);
+        seized = _slash($, validator, bps);
+        if (seized == 0) revert NothingToSlash();
+    }
+
+    function _slash(StakingStorage storage $, address validator, uint256 bps) private returns (uint256 seized) {
         uint256 bond = $.bondPaid[validator];
         seized = (bond * bps) / BPS;
         emit Slashed(validator, bps, seized);
@@ -516,6 +557,17 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     function setSlasher(address slasher_) external onlyOwner {
         _s().slasher = slasher_;
         emit SlasherSet(slasher_);
+    }
+
+    /// @notice What `slashEquivocation` takes of a bond, 0 closing it, and how many epochs old
+    ///         a round may be. Keep that shorter than the unbonding period, which is in seconds.
+    function setEquivocation(uint256 bps, uint256 evidenceEpochs_) external onlyOwner {
+        if (bps > BPS) revert InvalidBps();
+        StakingStorage storage $ = _s();
+        $.equivocationBps = uint16(bps);
+        // No round is older than uint64 epochs, so the cap changes nothing.
+        $.evidenceEpochs = uint64(FixedPointMathLib.min(evidenceEpochs_, type(uint64).max));
+        emit EquivocationSet(bps, evidenceEpochs_);
     }
 
     /// @notice The L1 bridge gateway that bonds arrive through and leave by.
@@ -691,6 +743,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     function slasher() external view returns (address) {
         return _s().slasher;
+    }
+
+    function equivocationBps() external view returns (uint256) {
+        return _s().equivocationBps;
+    }
+
+    function evidenceEpochs() external view returns (uint256) {
+        return _s().evidenceEpochs;
     }
 
     function bondGateway() external view returns (address) {
