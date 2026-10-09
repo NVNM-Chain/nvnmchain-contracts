@@ -1067,6 +1067,31 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         assertGt(releaseAt, 0, "without standing her again");
     }
 
+    function test_candidacy_aTopUpRestartsTheUnbonding() public {
+        // Joining a matured bond as it stood, a top-up left in the block it arrived.
+        _resignUnderUnbonding();
+        vm.warp(block.timestamp + 7 days);
+        _bond(alice, 10 ether);
+
+        (uint256 amount, uint256 releaseAt) = staking.pendingBondOf(alice);
+        assertEq(amount, 60 ether);
+        assertEq(releaseAt, block.timestamp + 7 days, "the whole bond waits again");
+        vm.prank(alice);
+        vm.expectRevert(NVNMStaking.StillUnbonding.selector);
+        staking.withdrawBond();
+    }
+
+    function test_candidacy_aTopUpNeverBringsTheReleaseForward() public {
+        _resignUnderUnbonding();
+        (, uint256 releaseAt) = staking.pendingBondOf(alice);
+        vm.prank(owner);
+        staking.setUnbondingPeriod(1 days);
+
+        _bond(alice, 10 ether);
+        (, uint256 restarted) = staking.pendingBondOf(alice);
+        assertEq(restarted, releaseAt, "the shorter period does not cut the wait already owed");
+    }
+
     function test_candidacy_aBondThatNeverStoodGoesHome() public {
         _openRegistration(50 ether);
         _bond(alice, 10 ether);

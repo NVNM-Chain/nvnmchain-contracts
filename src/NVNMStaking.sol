@@ -384,9 +384,11 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     /// @notice `amount` more of `validator`'s bond, which the gateway has just minted here from
     ///         `validator`'s bond on Ethereum. Stands `validator` for election once the bond
-    ///         reaches `candidacyBond`, if nothing else stops it.
+    ///         reaches `candidacyBond`, if nothing else stops it. Joining an unbonding bond, it
+    ///         restarts the wait: otherwise it leaves with a matured one in the block it arrives.
     /// @dev Never reverts for the bond's sake: it is already locked on Ethereum, and a delivery
-    ///      that reverted would leave it there with no record here.
+    ///      that reverted would leave it there with no record here. The gateway must deliver a
+    ///      bond only from its own validator, or anyone restarts another's wait.
     function bondFromBridge(address validator, uint256 amount) external {
         StakingStorage storage $ = _s();
         if (msg.sender != $.bondGateway) revert NotBondGateway();
@@ -394,10 +396,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         $.bondPaid[validator] = bond;
         $.bonded += amount;
         emit BondReceived(validator, amount, bond);
-        if (
+        if ($.bondReleaseAt[validator] != 0) {
+            _unbondBond($, validator);
+        } else if (
             $.candidacyBond != 0 && bond >= $.candidacyBond && $.candidateIndex[validator] == 0
-                && $.bondReleaseAt[validator] == 0 && $.candidates.length < MAX_CANDIDATES
-        ) _addCandidate(validator);
+                && $.candidates.length < MAX_CANDIDATES
+        ) {
+            _addCandidate(validator);
+        }
     }
 
     /// @notice Stand for election on a bond bridged in at least `candidacyBond` deep, as one that
@@ -470,7 +476,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     function _unbondBond(StakingStorage storage $, address validator) private {
         // A zero period means slashing is closed (`setUnbondingPeriod`): releasing at once loses nothing.
-        uint256 releaseAt = block.timestamp + $.unbondingPeriod;
+        // Never before a release already set: a top-up under a shortened period must not cut it.
+        uint256 releaseAt = (block.timestamp + $.unbondingPeriod).max($.bondReleaseAt[validator]);
         $.bondReleaseAt[validator] = releaseAt;
         emit BondUnbonding(validator, $.bondPaid[validator], releaseAt);
     }
