@@ -1,0 +1,279 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import {GuardedSwapper} from "../src/GuardedSwapper.sol";
+import {MockERC20} from "./support/MockERC20.sol";
+import {MockSwapPool} from "./support/MockSwapPool.sol";
+import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+import {Test} from "forge-std/Test.sol";
+
+/// @dev Stands in for `FeeRouterFactory`: `keeper` plays a router it deployed.
+contract MockRouterRegistry {
+    mapping(address => bool) public isRouter;
+
+    function set(address account, bool active) external {
+        isRouter[account] = active;
+    }
+}
+
+/// @dev A market that re-enters the swapper from inside its own swap.
+contract ReenteringMarket {
+    GuardedSwapper immutable guard;
+
+    constructor(GuardedSwapper guard_) {
+        guard = guard_;
+    }
+
+    function swap(address tokenIn, address tokenOut, uint256 amountIn, uint256) external returns (uint256) {
+        guard.swap(tokenIn, tokenOut, amountIn, 0);
+        return 0;
+    }
+}
+
+/// @dev A market that sends half of what it reports.
+contract OverstatingMarket {
+    function swap(address tokenIn, address tokenOut, uint256 amountIn, uint256) external returns (uint256) {
+        SafeTransferLib.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
+        SafeTransferLib.safeTransfer(tokenOut, msg.sender, amountIn / 2);
+        return amountIn;
+    }
+}
+
+contract GuardedSwapperTest is Test {
+    GuardedSwapper guard;
+    MockSwapPool pool;
+    MockERC20 usd;
+    MockERC20 nvnm;
+    MockRouterRegistry registry;
+
+    address owner = makeAddr("safe");
+    address keeper = makeAddr("keeper");
+    address stranger = makeAddr("stranger");
+
+    function setUp() public {
+        usd = new MockERC20("nUSD", "nUSD");
+        nvnm = new MockERC20("NVNM", "NVNM");
+        pool = new MockSwapPool(address(usd), address(nvnm));
+        usd.mint(address(pool), 1000 ether);
+        nvnm.mint(address(pool), 1000 ether); // spot price 1:1
+
+        registry = new MockRouterRegistry();
+        registry.set(keeper, true);
+
+        guard = new GuardedSwapper(owner, address(usd), address(nvnm));
+        vm.startPrank(owner);
+        guard.setGuards(address(pool), 50 ether, 500, 2000); // cap 50, -5% floor, alpha 20%
+        guard.setDriftBand(1000); // the EMA may not decay past -10% of the seeded price
+        guard.setRouterFactory(address(registry));
+        guard.seedPrice(1 ether); // 1 NVNM per USD
+        vm.stopPrank();
+
+        for (address who = keeper;; who = stranger) {
+            usd.mint(who, 1000 ether);
+            vm.prank(who);
+            usd.approve(address(guard), type(uint256).max);
+            if (who == stranger) break;
+        }
+    }
+
+    function _swap(uint256 amountIn) internal returns (uint256) {
+        vm.prank(keeper);
+        return guard.swap(address(usd), address(nvnm), amountIn, 0);
+    }
+
+    function test_swap_withinGuards() public {
+        uint256 out = _swap(10 ether); // x*y=k: 1000*10/1010 ≈ 9.9 -> ~1% impact, within 5%
+        assertEq(nvnm.balanceOf(keeper), out);
+        assertGt(out, 9.8 ether);
+        assertLt(guard.emaPrice(), 1 ether); // EMA followed the (slightly lower) execution price
+    }
+
+    function test_swap_sizeCapEnforced() public {
+        vm.prank(keeper);
+        vm.expectRevert(GuardedSwapper.AmountTooLarge.selector);
+        guard.swap(address(usd), address(nvnm), 51 ether, 0);
+    }
+
+    function test_swap_manipulatedPoolReverts() public {
+        // Sandwich front-run: drain most of the NVNM side so execution price collapses.
+        vm.prank(address(pool));
+        nvnm.transfer(address(0xdead), 900 ether);
+
+        vm.prank(keeper);
+        vm.expectRevert(GuardedSwapper.PriceBelowFloor.selector);
+        guard.swap(address(usd), address(nvnm), 10 ether, 0);
+    }
+
+    function test_swap_requiresSeedAndInner() public {
+        GuardedSwapper fresh = new GuardedSwapper(owner, address(usd), address(nvnm));
+        vm.prank(owner);
+        fresh.setRouterFactory(address(registry));
+        vm.prank(keeper);
+        vm.expectRevert(GuardedSwapper.NotSeeded.selector);
+        fresh.swap(address(usd), address(nvnm), 1 ether, 0);
+    }
+
+    function test_swap_wrongPairReverts() public {
+        vm.prank(keeper);
+        vm.expectRevert(GuardedSwapper.WrongPair.selector);
+        guard.swap(address(nvnm), address(usd), 1 ether, 0);
+    }
+
+    function test_setGuards_rejectsBpsOverOneHundredPercent() public {
+        vm.startPrank(owner);
+        vm.expectRevert(GuardedSwapper.InvalidBps.selector);
+        guard.setGuards(address(pool), 50 ether, 10_001, 2000);
+        vm.expectRevert(GuardedSwapper.InvalidBps.selector);
+        guard.setGuards(address(pool), 50 ether, 500, 10_001);
+        vm.stopPrank();
+    }
+
+    function test_swap_zeroAmountReverts() public {
+        vm.prank(keeper);
+        vm.expectRevert(GuardedSwapper.ZeroAmount.selector);
+        guard.swap(address(usd), address(nvnm), 0, 0);
+    }
+
+    function test_onlyOwnerConfigures() public {
+        vm.startPrank(keeper);
+        vm.expectRevert();
+        guard.setGuards(address(pool), 1, 1, 1);
+        vm.expectRevert();
+        guard.seedPrice(2 ether);
+        vm.stopPrank();
+    }
+
+    function test_ema_admitsDriftButLimitsCumulativeDrain() public {
+        // Small swaps drift the EMA down and keep passing...
+        _swap(10 ether);
+        _swap(10 ether);
+        assertLt(guard.emaPrice(), 1 ether);
+
+        // ...but a large drain (price ~-7% vs the lagging EMA) is rejected...
+        vm.prank(keeper);
+        vm.expectRevert(GuardedSwapper.PriceBelowFloor.selector);
+        guard.swap(address(usd), address(nvnm), 40 ether, 0);
+
+        // ...while normal-sized swaps continue to clear.
+        assertGt(_swap(5 ether), 0);
+    }
+
+    function test_swap_onlyRoutersMayMoveThePrice() public {
+        // An open `swap` is near-free EMA manipulation: the caller keeps the output and trades
+        // at the pool's real price. Only the factory's routers get in, not even the owner.
+        vm.prank(stranger);
+        vm.expectRevert(GuardedSwapper.NotAuthorized.selector);
+        guard.swap(address(usd), address(nvnm), 1 ether, 0);
+
+        usd.mint(owner, 10 ether);
+        vm.startPrank(owner);
+        usd.approve(address(guard), type(uint256).max);
+        vm.expectRevert(GuardedSwapper.NotAuthorized.selector);
+        guard.swap(address(usd), address(nvnm), 1 ether, 0);
+        vm.stopPrank();
+
+        registry.set(stranger, true);
+        vm.prank(stranger);
+        assertGt(guard.swap(address(usd), address(nvnm), 1 ether, 0), 0);
+    }
+
+    function test_swap_unsetFactoryStopsEverySwap() public {
+        vm.prank(owner);
+        guard.setRouterFactory(address(0));
+        vm.prank(keeper);
+        vm.expectRevert(GuardedSwapper.NotAuthorized.selector);
+        guard.swap(address(usd), address(nvnm), 1 ether, 0);
+    }
+
+    /// @dev Swap 5 NVNM-worth up to `rounds` times, stopping at the first rejection.
+    function _walkPriceDown(uint256 rounds) internal returns (uint256 cleared) {
+        for (uint256 i; i < rounds; ++i) {
+            vm.prank(keeper);
+            try guard.swap(address(usd), address(nvnm), 5 ether, 0) {
+                ++cleared;
+            } catch {
+                return cleared;
+            }
+        }
+    }
+
+    function test_driftBand_stopsTheEmaBeingWalkedDown() public {
+        // Each swap lands just inside `maxDeviationBps`, so an EMA-only floor decays with the
+        // price it guards and never binds. The reference band is what halts the walk.
+        uint256 rounds = 100;
+        uint256 clearedWithBand = _walkPriceDown(rounds);
+        assertLt(clearedWithBand, rounds, "the band must reject a swap eventually");
+        assertGe(guard.emaPrice(), 0.9 ether, "EMA never sinks below the reference band");
+
+        setUp(); // fresh pool and price
+        vm.prank(owner);
+        guard.setDriftBand(10_000); // disable the reference leg: EMA-only, as before the fix
+        assertEq(_walkPriceDown(rounds), rounds, "EMA-only floor never binds");
+        // ~0.46 measured: 100 swaps walk it to roughly half the seeded price, and nothing in
+        // the EMA leg alone stops the walk continuing.
+        assertLt(guard.emaPrice(), 0.9 ether, "and the price is walked past the band");
+    }
+
+    function test_setDriftBand_rejectsBpsOverOneHundredPercent() public {
+        vm.prank(owner);
+        vm.expectRevert(GuardedSwapper.InvalidBps.selector);
+        guard.setDriftBand(10_001);
+    }
+
+    function test_ema_manipulatedHighPrintsCannotRatchetTheFloor() public {
+        // Anyone may create a router for itself, so a hostile one can print dust swaps at a
+        // pumped price. Each pays out in full, but the EMA never rises past the reference —
+        // otherwise a run of them walks the floor above the honest price and every later
+        // buyback reverts until the owner reseeds.
+        nvnm.mint(address(pool), 9000 ether); // pump to ~10:1, far above the +5% band
+        for (uint256 i; i < 10; ++i) {
+            _swap(1e6);
+        }
+        assertEq(guard.emaPrice(), 1 ether, "EMA stays at the reference");
+
+        // Back at an honest 1:1 market the floor has not moved out from under real prices.
+        MockSwapPool honest = new MockSwapPool(address(usd), address(nvnm));
+        usd.mint(address(honest), 1000 ether);
+        nvnm.mint(address(honest), 1000 ether);
+        vm.prank(owner);
+        guard.setGuards(address(honest), 50 ether, 500, 2000);
+        assertGt(_swap(1 ether), 0, "honest-priced swaps keep clearing");
+    }
+
+    function test_ema_aHighPrintPullsOnlyInsideTheBand() public {
+        // Below the reference, where the EMA may still rise: one pumped print lifts it by the
+        // +5% band at 20% weight, 1%, and no further.
+        _walkPriceDown(10);
+        uint256 ema = guard.emaPrice();
+        assertLt(ema * 105 / 100, 1 ether, "the band binds before the reference does");
+        nvnm.mint(address(pool), 9000 ether);
+        _swap(1e6);
+        assertApproxEqAbs(guard.emaPrice(), ema * 101 / 100, 1);
+    }
+
+    function test_swap_rejectsAMarketThatReenters() public {
+        // The inner market runs before the EMA moves; one calling back in would be judged
+        // against the stale price. The guard fires before authorization, so the reentrant call
+        // fails as reentrancy rather than as an unauthorized caller.
+        ReenteringMarket market = new ReenteringMarket(guard);
+        vm.prank(owner);
+        guard.setGuards(address(market), 50 ether, 500, 2000);
+        vm.expectRevert(ReentrancyGuard.Reentrancy.selector);
+        _swap(10 ether);
+    }
+
+    function test_swap_judgesWhatArrivedNotWhatTheMarketReports() public {
+        // Reported at 1:1, delivered at 1:2: the floor sees the delivered price, and the NVNM
+        // the swapper already holds is not there to make up the difference.
+        OverstatingMarket market = new OverstatingMarket();
+        nvnm.mint(address(market), 100 ether);
+        nvnm.mint(address(guard), 100 ether);
+        vm.prank(owner);
+        guard.setGuards(address(market), 50 ether, 500, 2000);
+
+        vm.expectRevert(GuardedSwapper.PriceBelowFloor.selector);
+        _swap(10 ether);
+        assertEq(nvnm.balanceOf(address(guard)), 100 ether);
+    }
+}

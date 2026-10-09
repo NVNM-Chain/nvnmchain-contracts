@@ -1,0 +1,234 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import {BPS} from "./Constants.sol";
+import {IValidatorConfigV2} from "./interfaces/IValidatorConfigV2.sol";
+import {Ownable} from "solady/auth/Ownable.sol";
+import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+
+/// @title FeeLockbox
+/// @notice Holds the validator share of network fees per operator until distribution commences:
+///         non-affiliated validators must exceed half the active set, and a majority of that set
+///         must vote for it. No operator, affiliated or not, is paid before then. Also holds the
+///         fee split, which that set votes proposal by proposal: one applies once a majority has
+///         backed it for `splitDelay`, and before commencement may neither raise devshare nor cut
+///         the validator share.
+/// @dev The owner declares each validator affiliated or not, once, and commencement waits until
+///      every active one is declared. The set is read from the registry at each count, so a
+///      removed validator's vote stops counting, and every record is a seat's, a registry entry
+///      held by an address: a newcomer given a departed validator's address, or a seat handed to
+///      a new address, starts with none. Commencement is permanent.
+contract FeeLockbox is Ownable, ReentrancyGuard {
+    IValidatorConfigV2 public constant REGISTRY = IValidatorConfigV2(0xCcCCCCcC00000000000000000000000000000001);
+    /// @notice The least share of gross fees the buyback cut may take.
+    uint256 public constant MIN_BUYBACK_BPS = 2_000;
+
+    /// @dev A proposed split, voted on its own: a vote never carries over to a later proposal.
+    struct Split {
+        uint16 devBps;
+        uint16 buyBps;
+        bool applied;
+    }
+
+    uint256 public immutable splitDelay; // how long a backing majority is public before it applies
+    uint128 public devshareBps;
+    uint128 public buybackBps;
+    Split[] public splits;
+    mapping(uint256 => mapping(bytes32 => uint64)) public backedSince; // proposal => seat => time, 0 = not
+
+    bool public commenced;
+    uint256 public splitsBeforeCommencement; // proposals below this id were voted under the old rules
+    mapping(bytes32 => bool) public declared; // seat => its affiliation is on record
+    mapping(bytes32 => bool) public affiliated; // seat => affiliated with the founding parties
+    mapping(bytes32 => bool) public voted; // seat => votes to commence
+    mapping(address => mapping(address => uint256)) public owed; // token => operator => deferred
+
+    event Deposited(address indexed token, address indexed operator, uint256 amount);
+    event Paid(address indexed token, address indexed operator, uint256 amount);
+    event Affiliated(address indexed validator, bool affiliated);
+    event Voted(address indexed validator, bool support);
+    event Commenced(uint256 active, uint256 affiliatedCount, uint256 votes);
+    event SplitProposed(uint256 indexed id, address indexed validator, uint256 devBps, uint256 buyBps);
+    event SplitVoted(uint256 indexed id, address indexed validator, bool support);
+    event SplitApplied(uint256 indexed id, uint256 devBps, uint256 buyBps);
+
+    error ZeroAddress();
+    error NotCommenced();
+    error AlreadyCommenced();
+    error NotValidator();
+    error MajorityAffiliated();
+    error Undeclared();
+    error AlreadyDeclared();
+    error VoteShort();
+    error InvalidBps();
+    error BuybackBelowFloor();
+    error NoSuchSplit();
+    error SplitStale();
+    error SplitPending();
+    error AlreadyApplied();
+    error DevshareRaised();
+    error ValidatorShareCut();
+    error ZeroDelay();
+
+    constructor(address owner_, uint256 devshareBps_, uint256 buybackBps_, uint256 splitDelay_) {
+        _initializeOwner(owner_);
+        _checkSplit(devshareBps_, buybackBps_);
+        if (splitDelay_ == 0) revert ZeroDelay();
+        devshareBps = uint128(devshareBps_);
+        buybackBps = uint128(buybackBps_);
+        splitDelay = splitDelay_;
+    }
+
+    /// @notice Pull `amount` of `token` for `operator`, held until commencement. After it, routers
+    ///         pay operators directly.
+    function deposit(address token, address operator, uint256 amount) external nonReentrant {
+        if (operator == address(0)) revert ZeroAddress();
+        if (commenced) revert AlreadyCommenced();
+        SafeTransferLib.safeTransferFrom(token, msg.sender, address(this), amount);
+        owed[token][operator] += amount;
+        emit Deposited(token, operator, amount);
+    }
+
+    /// @notice Pay `operator` what it was owed in `token` before commencement. Permissionless.
+    function claim(address token, address operator) external nonReentrant returns (uint256 amount) {
+        if (!commenced) revert NotCommenced();
+        amount = owed[token][operator];
+        if (amount == 0) return 0;
+        owed[token][operator] = 0;
+        SafeTransferLib.safeTransfer(token, operator, amount);
+        emit Paid(token, operator, amount);
+    }
+
+    /// @notice Declare whether the active validator `validator` is affiliated with the founding
+    ///         parties. Final for that seat.
+    function setAffiliated(address validator, bool affiliated_) external onlyOwner {
+        bytes32 s = _seat(_active(validator));
+        if (declared[s]) revert AlreadyDeclared();
+        declared[s] = true;
+        affiliated[s] = affiliated_;
+        emit Affiliated(validator, affiliated_);
+    }
+
+    /// @notice An active validator's vote to commence distribution.
+    function vote(bool support) external {
+        voted[_seat(_active(msg.sender))] = support;
+        emit Voted(msg.sender, support);
+    }
+
+    /// @notice Start distribution once every active validator is declared and both conditions
+    ///         hold. Permissionless.
+    function commence() external {
+        if (commenced) revert AlreadyCommenced();
+        (uint256 active, uint256 affiliatedCount, uint256 votes, uint256 undeclared) = composition();
+        if (undeclared != 0) revert Undeclared();
+        if ((active - affiliatedCount) * 2 <= active) revert MajorityAffiliated();
+        if (votes * 2 <= active) revert VoteShort();
+        commenced = true;
+        splitsBeforeCommencement = splits.length;
+        emit Commenced(active, affiliatedCount, votes);
+    }
+
+    /// @notice The active set's size, and how many of it are affiliated, have voted to commence,
+    ///         and are undeclared.
+    function composition()
+        public
+        view
+        returns (uint256 active, uint256 affiliatedCount, uint256 votes, uint256 undeclared)
+    {
+        IValidatorConfigV2.Validator[] memory set = REGISTRY.getActiveValidators();
+        active = set.length;
+        for (uint256 i; i < active; ++i) {
+            bytes32 s = _seat(set[i]);
+            if (!declared[s]) ++undeclared;
+            if (affiliated[s]) ++affiliatedCount;
+            if (voted[s]) ++votes;
+        }
+    }
+
+    /// @notice The key a seat's records live under: registry entry `index` held by `validator`.
+    function seat(uint64 index, address validator) public pure returns (bytes32) {
+        return keccak256(abi.encode(index, validator));
+    }
+
+    // -- the fee split -------------------------------------------------------
+    /// @notice Propose a split, as an active validator, who thereby backs it.
+    function proposeSplit(uint256 devBps, uint256 buyBps) external returns (uint256 id) {
+        bytes32 s = _seat(_active(msg.sender));
+        _checkSplit(devBps, buyBps);
+        id = splits.length;
+        // Narrowed after `_checkSplit`: both ratios fit.
+        splits.push(Split({devBps: uint16(devBps), buyBps: uint16(buyBps), applied: false}));
+        backedSince[id][s] = uint64(block.timestamp);
+        emit SplitProposed(id, msg.sender, devBps, buyBps);
+    }
+
+    /// @notice An active validator's vote on split proposal `id`. Backing again keeps its start.
+    function voteSplit(uint256 id, bool support) external {
+        bytes32 s = _seat(_active(msg.sender));
+        if (id >= splits.length) revert NoSuchSplit();
+        if (!support) backedSince[id][s] = 0;
+        else if (backedSince[id][s] == 0) backedSince[id][s] = uint64(block.timestamp);
+        emit SplitVoted(id, msg.sender, support);
+    }
+
+    /// @notice Apply proposal `id` once a majority of the active set has backed it for
+    ///         `splitDelay`. Permissionless.
+    /// @dev Devshare does not wait on commencement, so until then a proposal may not raise it, nor
+    ///      cut the validator share: either pays the founding parties while they hold the set.
+    ///      Commencement voids earlier proposals, or one refused then could pass on its old votes.
+    function applySplit(uint256 id) external {
+        if (id >= splits.length) revert NoSuchSplit();
+        if (id < splitsBeforeCommencement) revert SplitStale();
+        Split memory s = splits[id];
+        if (s.applied) revert AlreadyApplied();
+        (uint256 active, uint256 backers, uint256 settled) = splitTally(id);
+        if (backers * 2 <= active) revert VoteShort();
+        if (settled * 2 <= active) revert SplitPending();
+        (uint256 devBps, uint256 buyBps) = (s.devBps, s.buyBps);
+        if (!commenced) {
+            if (devBps > devshareBps) revert DevshareRaised();
+            if (devBps + buyBps > uint256(devshareBps) + buybackBps) revert ValidatorShareCut();
+        }
+        splits[id].applied = true;
+        devshareBps = uint128(devBps);
+        buybackBps = uint128(buyBps);
+        emit SplitApplied(id, devBps, buyBps);
+    }
+
+    /// @notice The active set's size, how many of it back split proposal `id`, and how many of
+    ///         those have for `splitDelay`.
+    function splitTally(uint256 id) public view returns (uint256 active, uint256 backers, uint256 settled) {
+        IValidatorConfigV2.Validator[] memory set = REGISTRY.getActiveValidators();
+        active = set.length;
+        for (uint256 i; i < active; ++i) {
+            uint256 since = backedSince[id][_seat(set[i])];
+            if (since == 0) continue;
+            ++backers;
+            if (block.timestamp >= since + splitDelay) ++settled;
+        }
+    }
+
+    /// @notice The split in force, in one read.
+    function split() external view returns (uint256 devBps, uint256 buyBps) {
+        return (devshareBps, buybackBps);
+    }
+
+    function _checkSplit(uint256 devBps, uint256 buyBps) private pure {
+        if (devBps + buyBps > BPS) revert InvalidBps();
+        if (buyBps < MIN_BUYBACK_BPS) revert BuybackBelowFloor();
+    }
+
+    function _seat(IValidatorConfigV2.Validator memory v) private pure returns (bytes32) {
+        return seat(v.index, v.validatorAddress);
+    }
+
+    /// @dev `who`'s active registry entry.
+    function _active(address who) private view returns (IValidatorConfigV2.Validator memory) {
+        IValidatorConfigV2.Validator[] memory set = REGISTRY.getActiveValidators();
+        for (uint256 i; i < set.length; ++i) {
+            if (set[i].validatorAddress == who) return set[i];
+        }
+        revert NotValidator();
+    }
+}
