@@ -15,7 +15,8 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 ///         revert instead of donating the buyback. Routers hold the funds and retry.
 /// @dev The floor is two-sided and both legs bind. `maxDeviationBps` against the EMA absorbs
 ///      honest drift; `maxDriftBps` against the owner-seeded `refPrice` is what stops the EMA
-///      being walked down, since alone it decays with the price it guards.
+///      being walked down, since alone it decays with the price it guards. The EMA never rises
+///      past `refPrice` either, so the floor follows a higher market only once the owner reseeds.
 ///
 ///      `swap` is routers-only because moving the EMA is otherwise near-free: a direct caller,
 ///      the owner included, keeps the output, where a router's goes to the buyback sink. Anyone
@@ -35,7 +36,7 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
     uint256 public maxDriftBps; // allowed drop below the seeded reference price
     uint256 public emaAlphaBps; // EMA weight of the newest observation
     uint256 public emaPrice; // tokenOut per WAD tokenIn; 0 until seeded
-    uint256 public refPrice; // owner-seeded reference; the EMA cannot decay past its band
+    uint256 public refPrice; // owner-seeded reference; the EMA stays between its band and it
 
     event GuardsSet(address inner, uint256 maxAmountIn, uint256 maxDeviationBps, uint256 emaAlphaBps);
     event DriftBandSet(uint256 maxDriftBps);
@@ -114,15 +115,18 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
         out = SafeTransferLib.balanceOf(tokenOut, address(this)) - held;
 
         uint256 price = (out * WAD) / amountIn;
+        uint256 ref = refPrice;
         // Whichever floor binds harder. Every accepted price clears the reference floor, so the
         // EMA — a convex combination of accepted prices and its own past — cannot sink below it.
         uint256 floorPrice =
-            FixedPointMathLib.max((ema * (BPS - maxDeviationBps)) / BPS, (refPrice * (BPS - maxDriftBps)) / BPS);
+            FixedPointMathLib.max((ema * (BPS - maxDeviationBps)) / BPS, (ref * (BPS - maxDriftBps)) / BPS);
         if (price < floorPrice) revert PriceBelowFloor();
 
-        // A high print pays out in full but pulls on the EMA only inside the band, or one
-        // manipulated print ratchets the floor above the honest price until the owner reseeds.
+        // A high print pays out in full but pulls on the EMA only inside the band, and never
+        // past the reference: a run of manipulated prints would otherwise walk the floor above
+        // the honest price, where every swap reverts until the owner reseeds.
         uint256 emaInput = FixedPointMathLib.min(price, (ema * (BPS + maxDeviationBps)) / BPS);
+        emaInput = FixedPointMathLib.min(emaInput, ref);
         emaPrice = (emaInput * emaAlphaBps + ema * (BPS - emaAlphaBps)) / BPS;
         SafeTransferLib.safeTransfer(tokenOut, msg.sender, out);
         emit GuardedSwap(amountIn, out, price, emaPrice);

@@ -221,15 +221,16 @@ contract GuardedSwapperTest is Test {
         guard.setDriftBand(10_001);
     }
 
-    function test_ema_manipulatedHighPrintCannotRatchetTheFloor() public {
-        // Router creation is permissionless, so a hostile router can print one swap at a
-        // pumped price. The print pays out in full, but its pull on the EMA is clamped to the
-        // deviation band — otherwise the floor ratchets above the honest price and every later
+    function test_ema_manipulatedHighPrintsCannotRatchetTheFloor() public {
+        // Anyone may create a router for itself, so a hostile one can print dust swaps at a
+        // pumped price. Each pays out in full, but the EMA never rises past the reference —
+        // otherwise a run of them walks the floor above the honest price and every later
         // buyback reverts until the owner reseeds.
         nvnm.mint(address(pool), 9000 ether); // pump to ~10:1, far above the +5% band
-        _swap(1 ether);
-        // Clamped EMA input is exactly ema * 1.05, at 20% weight: 1.05*0.2 + 1*0.8 = 1.01.
-        assertEq(guard.emaPrice(), 1.01 ether, "EMA absorbs the clamped print only");
+        for (uint256 i; i < 10; ++i) {
+            _swap(1e6);
+        }
+        assertEq(guard.emaPrice(), 1 ether, "EMA stays at the reference");
 
         // Back at an honest 1:1 market the floor has not moved out from under real prices.
         MockSwapPool honest = new MockSwapPool(address(usd), address(nvnm));
@@ -238,6 +239,17 @@ contract GuardedSwapperTest is Test {
         vm.prank(owner);
         guard.setGuards(address(honest), 50 ether, 500, 2000);
         assertGt(_swap(1 ether), 0, "honest-priced swaps keep clearing");
+    }
+
+    function test_ema_aHighPrintPullsOnlyInsideTheBand() public {
+        // Below the reference, where the EMA may still rise: one pumped print lifts it by the
+        // +5% band at 20% weight, 1%, and no further.
+        _walkPriceDown(10);
+        uint256 ema = guard.emaPrice();
+        assertLt(ema * 105 / 100, 1 ether, "the band binds before the reference does");
+        nvnm.mint(address(pool), 9000 ether);
+        _swap(1e6);
+        assertApproxEqAbs(guard.emaPrice(), ema * 101 / 100, 1);
     }
 
     function test_swap_rejectsAMarketThatReenters() public {
