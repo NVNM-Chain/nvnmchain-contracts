@@ -35,7 +35,8 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   election is configured, and is the `slasher`'s: a Safe without that delay, or a resigning
   validator would withdraw its bond first. `slashEquivocation` is anyone's instead, on
   evidence the node's registry accepts that a validator's key signed conflicting votes,
-  once `setEquivocation` opens it.
+  once `setEquivocation` opens it; whoever brings it pays the bridge's fee and earns nothing,
+  since the seized bond burns.
 - **GuardedSwapper** — buyback-market wrapper: a per-swap size cap and a two-sided price
   floor, so a sandwiched pool makes the swap revert instead of donating the buyback. Only
   the factory's routers may swap, not the owner.

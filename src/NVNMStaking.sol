@@ -381,7 +381,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     ///         the conflicting votes in `evidence`, as the node's registry reads it. Anyone may
     ///         bring it: once for a key and round, and while the round is no more than
     ///         `evidenceEpochs` old. With no bond to slash it reverts, and the round stays open
-    ///         for one that arrives in time. You pay the bridge's fee (see {IBondGateway}).
+    ///         for one that arrives in time. You pay the bridge's fee (see {IBondGateway}) and
+    ///         are not paid back: what is seized burns, so bringing evidence is the validators'
+    ///         and the foundation's own interest, not a bounty.
     function slashEquivocation(bytes calldata evidence) external nonReentrant returns (uint256 seized) {
         StakingStorage storage $ = _s();
         uint256 bps = $.equivocationBps;
