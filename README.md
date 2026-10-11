@@ -36,7 +36,8 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   validator would withdraw its bond first. `slashEquivocation` is anyone's instead, on
   evidence the node's registry accepts that a validator's key signed conflicting votes,
   once `setEquivocation` opens it; whoever brings it pays the bridge's fee and earns nothing,
-  since the seized bond burns.
+  since the seized bond burns. The lockbox on Ethereum has a slasher of its own, for the slash
+  this chain's validators would leave out, and `slashFromBridge` drops here what it seized.
 - **GuardedSwapper** — buyback-market wrapper: a per-swap size cap and a two-sided price
   floor, so a sandwiched pool makes the swap revert instead of donating the buyback. Only
   the factory's routers may swap, not the owner.

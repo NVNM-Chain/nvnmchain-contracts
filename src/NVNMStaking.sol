@@ -18,7 +18,9 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 /// @dev UUPS proxy. `owner` upgrades, and should be a timelock longer than `MAX_UNBONDING` so
 ///      delegators can exit before a change lands. `slasher` acts without that delay, or a
 ///      resigning validator would withdraw its bond before a queued slash; `slash` seizes only
-///      the validator's acquired bond — delegators are never slashed. Election is top-N by
+///      the validator's acquired bond — delegators are never slashed. Ethereum's lockbox has a
+///      slasher of its own, for the slash this chain's validators would not carry, and
+///      `slashFromBridge` keeps the books here in step. Election is top-N by
 ///      `acquired * acquiredWeight + delegated`. Each seat votes once; the node draws block
 ///      proposers by the same score (`electionWeight`). Stake and bond both exit through the
 ///      unbonding period.
@@ -403,14 +405,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     function _slash(StakingStorage storage $, address validator, uint256 bps) private returns (uint256 seized) {
-        uint256 bond = $.bondPaid[validator];
-        seized = (bond * bps) / BPS;
+        seized = ($.bondPaid[validator] * bps) / BPS;
         emit Slashed(validator, bps, seized);
-        if (seized != 0) {
-            $.bondPaid[validator] = bond - seized;
-            $.bonded -= seized;
-            _approvedGateway($, seized).seize(validator, seized, msg.sender);
-        }
+        if (seized != 0) _debitBond($, validator, seized).seize(validator, seized, msg.sender);
     }
 
     // -- candidacy -----------------------------------------------------------
@@ -449,6 +446,18 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         }
     }
 
+    /// @notice Drop up to `amount` of `validator`'s bond, which the lockbox's own slasher has
+    ///         seized on Ethereum, and leave it to the gateway to burn. An unbonding bond too.
+    /// @dev Never reverts for the bond's sake, as {bondFromBridge}: Ethereum has already seized.
+    function slashFromBridge(address validator, uint256 amount) external returns (uint256 seized) {
+        StakingStorage storage $ = _s();
+        if (msg.sender != $.bondGateway) revert NotBondGateway();
+        uint256 bond = $.bondPaid[validator];
+        seized = amount.min(bond);
+        emit Slashed(validator, bond == 0 ? 0 : (seized * BPS) / bond, seized);
+        if (seized != 0) _debitBond($, validator, seized);
+    }
+
     /// @notice Stand for election on a bond bridged in at least `candidacyBond` deep, as one that
     ///         arrived while the list was full or the bond was unbonding. Cancels the unbonding.
     function registerCandidate() external nonReentrant {
@@ -468,23 +477,27 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         _unbondBond($, msg.sender);
     }
 
-    /// @notice Send your matured bond, net of any slashing during unbonding, home to your bond on
-    ///         Ethereum. You pay the bridge's fee (see {IBondGateway}).
+    /// @notice Send your matured bond, net of any slashing during unbonding, home to Ethereum,
+    ///         where the lockbox pays it out after a wait of its own. You pay the bridge's fee
+    ///         (see {IBondGateway}).
     function withdrawBond() external nonReentrant returns (uint256 amount) {
         StakingStorage storage $ = _s();
         uint256 releaseAt = $.bondReleaseAt[msg.sender];
         if (releaseAt == 0) revert NothingToWithdraw();
         if (block.timestamp < releaseAt) revert StillUnbonding();
         amount = $.bondPaid[msg.sender];
-        $.bondPaid[msg.sender] = 0;
         $.bondReleaseAt[msg.sender] = 0;
-        $.bonded -= amount;
         emit BondWithdrawn(msg.sender, amount);
-        if (amount != 0) _approvedGateway($, amount).returnBond(msg.sender, amount, msg.sender);
+        if (amount != 0) _debitBond($, msg.sender, amount).returnBond(msg.sender, amount, msg.sender);
     }
 
-    /// @dev The gateway, approved to burn `amount` of the bonds held here.
-    function _approvedGateway(StakingStorage storage $, uint256 amount) private returns (IBondGateway gateway) {
+    /// @dev Takes `amount` off `validator`'s bond and approves the gateway to burn it.
+    function _debitBond(StakingStorage storage $, address validator, uint256 amount)
+        private
+        returns (IBondGateway gateway)
+    {
+        $.bondPaid[validator] -= amount;
+        $.bonded -= amount;
         gateway = IBondGateway($.bondGateway);
         SafeTransferLib.safeApprove($.stakeToken, address(gateway), amount);
     }
