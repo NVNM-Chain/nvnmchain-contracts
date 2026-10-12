@@ -546,12 +546,28 @@ contract FeeRouterTest is Test {
     }
 
     function test_factory_isDeterministicPerParams() public {
-        vm.expectRevert();
-        _create(validator, operator, 1000);
+        assertEq(_create(validator, operator, 1000), address(router), "the one it has, not a second");
         address other = _create(validator, operator, 2000);
         assertTrue(other != address(router));
         assertEq(FeeRouter(other).commissionBps(), 2000);
         assertEq(FeeRouter(other).rewardToken(), address(usd));
+    }
+
+    function test_create_goesBackToARouterTheValidatorHadBefore() public {
+        address other = _create(validator, operator, 2000);
+        assertEq(factory.routerOf(validator), other);
+
+        vm.expectEmit();
+        emit FeeRouterFactory.RouterCreated(validator, address(router), operator, 1000);
+        vm.prank(validator);
+        assertEq(factory.create(validator, operator, 1000), address(router));
+        assertEq(factory.routerOf(validator), address(router));
+
+        // Under the cap of the day, like a new one.
+        vm.prank(owner);
+        factory.setMaxCommission(1500);
+        vm.expectRevert(FeeRouterFactory.CommissionTooHigh.selector);
+        _create(validator, operator, 2000);
     }
 
     function test_flush_paysTheOperatorOnceCommenced() public {

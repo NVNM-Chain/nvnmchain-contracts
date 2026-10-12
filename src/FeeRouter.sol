@@ -7,6 +7,7 @@ import {IFeeManager} from "./interfaces/IFeeManager.sol";
 import {INVNMStaking} from "./interfaces/INVNMStaking.sol";
 import {ISwapCap, ISwapper} from "./interfaces/ISwapper.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
+import {LibClone} from "solady/utils/LibClone.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
@@ -292,7 +293,8 @@ contract FeeRouterFactory is Ownable {
         return (devshare, BUYBACK_SINK, devBps, buyBps, swapper, swapGas);
     }
 
-    /// @notice A router for `validator`, from now on the one the registry takes for it. Only the
+    /// @notice A router for `validator`, from now on the one the registry takes for it: a new
+    ///         one, or the one it already has for this operator and commission. Only the
     ///         validator or the owner: a router names who is paid the operator share. The owner
     ///         keeps the right so a seat that never routes can be made to take the cuts, and in
     ///         doing so names that seat's operator. Deployed under the registry's owner, which
@@ -302,10 +304,16 @@ contract FeeRouterFactory is Ownable {
         if (msg.sender != validator && msg.sender != owner()) revert Unauthorized();
         if (commissionBps > maxCommissionBps) revert CommissionTooHigh();
         bytes32 salt = keccak256(abi.encode(validator, operator, commissionBps));
-        router = address(new FeeRouter{salt: salt}(validator, operator, staking, address(this), commissionBps));
-        // Now, while no block pays it yet: FeeManager refuses the change in a router's own blocks.
-        FeeRouter(router).setValidatorToken();
-        isRouter[router] = true;
+        bytes memory args = abi.encode(validator, operator, staking, address(this), commissionBps);
+        bytes32 initCodeHash = keccak256(abi.encodePacked(type(FeeRouter).creationCode, args));
+        router = LibClone.predictDeterministicAddress(initCodeHash, salt, address(this));
+        // Deploying to an address a second time reverts, so a validator could not go back.
+        if (!isRouter[router]) {
+            new FeeRouter{salt: salt}(validator, operator, staking, address(this), commissionBps);
+            // Now, while no block pays it yet: FeeManager refuses the change in a router's own blocks.
+            FeeRouter(router).setValidatorToken();
+            isRouter[router] = true;
+        }
         routerOf[validator] = router;
         emit RouterCreated(validator, router, operator, commissionBps);
     }
