@@ -22,7 +22,9 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
 - **FeeLockbox** — holds every router's validator share, delegators' included, owed to its
   operator until distribution commences: non-affiliated validators over half the registry's
   active set, and a majority of that set voting for it. The owner declares every validator
-  affiliated or not, once, before it can commence. Also holds the fee split (25/25 at
+  affiliated or not, once, before it can commence, so withholding one declaration holds
+  distribution up for good: that veto is part of what the owner is trusted with. Also holds
+  the fee split (25/25 at
   Phase 1, buybacks never below 20%), which that set votes proposal by proposal: one applies
   once a majority has backed it for `splitDelay`, and before commencement may neither raise
   devshare nor cut the validator share.
@@ -42,11 +44,11 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
 Each contract's own NatSpec carries the rest — why `flush` takes a token, why the EMA
 floor is two-sided, why a departing bond stays slashable.
 
-Two things the phase plan needs that these contracts do not enforce: the registry owner
-must point each validator's `feeRecipient` at its router (from T12, where genesis names the
-factory as `feeRouterFactory`, the node lets nobody else set it and pays blocks nowhere
-else), and the phase gates (TTM revenue, the 5 → 9 → 15 → 21 ramp) are governance calls,
-not on-chain conditions. Through Phase 4 the ramp is registry adds, with `maxSeats` left at
+Two things the phase plan needs that these contracts do not enforce: a router for each
+validator (from T12, where genesis names the factory as `feeRouterFactory`, the node pays a
+validator's blocks to the router the factory holds for it, and to the registry's recipient
+until it holds one), and the phase gates (TTM revenue, the 5 → 9 → 15 → 21 ramp) are
+governance calls, not on-chain conditions. Through Phase 4 the ramp is registry adds, with `maxSeats` left at
 0 so the node seats the registry; setting it is Phase 5, and it also opens slashing.
 
 ### One pool or one per validator
