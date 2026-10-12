@@ -14,6 +14,14 @@ contract MockBondGateway is IBondGateway {
     mapping(address => uint256) public seized;
     mapping(address => uint256) public burned;
     address public feePayer;
+    /// @dev Refuses every send, as a paused endpoint or an unpaid fee would.
+    bool public refusing;
+
+    error Refused();
+
+    function refuse(bool refusing_) external {
+        refusing = refusing_;
+    }
 
     constructor(MockERC20 token) {
         TOKEN = token;
@@ -34,12 +42,14 @@ contract MockBondGateway is IBondGateway {
     }
 
     function returnBond(address validator, uint256 amount, address feePayer_) external {
+        if (refusing) revert Refused();
         TOKEN.transferFrom(msg.sender, address(this), amount);
         returned[validator] += amount;
         feePayer = feePayer_;
     }
 
     function seize(address validator, uint256 amount, address feePayer_) external {
+        if (refusing) revert Refused();
         TOKEN.transferFrom(msg.sender, address(this), amount);
         seized[validator] += amount;
         feePayer = feePayer_;

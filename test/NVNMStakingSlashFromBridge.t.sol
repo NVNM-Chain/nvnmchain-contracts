@@ -53,7 +53,7 @@ contract NVNMStakingSlashFromBridgeTest is NVNMStakingTestBase {
         _openRegistration(100 ether);
         _bond(validator, 100 ether);
 
-        vm.prank(slasher);
+        vm.prank(bob);
         vm.expectRevert(NVNMStaking.NotBondGateway.selector);
         staking.slashFromBridge(validator, 100 ether);
     }

@@ -31,9 +31,9 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   equal seat each, ties in registry order. `minAcquired` is the 1M NVNM acquired stake a
   seat takes; below `minSeats` the election returns nobody, and the node then applies its
   own floor, `min(4, registry)`. Slashing takes only the bond, once the election is configured:
-  the `slasher` at will, anyone with the registry's evidence of conflicting votes
-  (`slashEquivocation`, unpaid: the seized bond burns), and the lockbox's own slasher on
-  Ethereum, which `slashFromBridge` follows here.
+  anyone with the registry's evidence of conflicting votes (`slashEquivocation`, unpaid: the
+  seized bond burns), and the lockbox's own slasher on Ethereum, which `slashFromBridge`
+  follows here.
 - **GuardedSwapper** — buyback-market wrapper: a per-swap size cap and a two-sided price
   floor, so a sandwiched pool makes the swap revert instead of donating the buyback. Only
   the factory's routers may swap, not the owner.

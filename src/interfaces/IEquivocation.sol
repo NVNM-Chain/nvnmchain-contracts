@@ -6,10 +6,10 @@ pragma solidity ^0.8.23;
 ///         a round. It reverts unless the votes conflict, the key signed both on this chain, and
 ///         the registry held the key in that epoch, or had retired it a few epochs before at most.
 interface IEquivocation {
-    /// @notice The address the registry holds the key under, where its bond is; the round the
-    ///         votes are for; and how many epochs before this block's that round was.
+    /// @notice The address the registry holds the key under, where its bond is, and the round
+    ///         the votes are for.
     function equivocator(bytes calldata evidence)
         external
         view
-        returns (address validator, uint64 epoch, uint64 viewNumber, uint64 epochsAgo);
+        returns (address validator, uint64 epoch, uint64 viewNumber);
 }

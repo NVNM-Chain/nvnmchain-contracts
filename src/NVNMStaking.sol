@@ -16,11 +16,11 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 ///         that validator's deposited stablecoin fees split pro-rata among its delegators.
 ///         Rewards are deposited, never minted, and vest over `rewardDuration`.
 /// @dev UUPS proxy. `owner` upgrades, and should be a timelock longer than `MAX_UNBONDING` so
-///      delegators can exit before a change lands. `slasher` acts without that delay, or a
-///      resigning validator would withdraw its bond before a queued slash; `slash` seizes only
-///      the validator's acquired bond — delegators are never slashed. Ethereum's lockbox has a
-///      slasher of its own, for the slash this chain's validators would not carry, and
-///      `slashFromBridge` keeps the books here in step. Election is top-N of the node's registry
+///      delegators can exit before a change lands. `slashEquivocation` seizes only the
+///      validator's acquired bond, on the registry's evidence that its key signed conflicting
+///      votes — delegators are never slashed. Ethereum's lockbox has a slasher of its own, for
+///      the slash this chain's validators would not carry, and `slashFromBridge` keeps the books
+///      here in step. Election is top-N of the node's registry
 ///      by `acquired * acquiredWeight + delegated`: the registry's owner curates who may stand,
 ///      a bond at `minAcquired` makes one electable. Each seat votes once; the node draws block
 ///      proposers by the same score (`electionWeight`). Stake and bond both exit through the
@@ -85,17 +85,15 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         mapping(address => uint256) rewardRate; // validator => ACC-scaled tokens per second
         mapping(address => uint256) rewardFinish; // validator => when the stream runs dry
         mapping(address => uint256) rewardUpdated; // validator => last accrual
-        address slasher; // may slash bonds without the owner's delay; 0 = nobody
         // The L1 bridge gateway: bonds arrive only through it and leave or are seized through it,
         // so each stays tied to its validator's bond on Ethereum.
         address bondGateway;
-        // Evidence slashing: what conflicting votes cost a bond, 0 = closed, and for how many
-        // epochs evidence of them counts. A key pays once for an epoch, whatever address the
-        // registry holds it under by then: one fault signs twice in many rounds. Both share
-        // the gateway's slot, which a slash reads anyway.
+        // Evidence slashing: what conflicting votes cost a bond, 0 = closed. A key pays once
+        // for an epoch, whatever address the registry holds it under by then: one fault signs
+        // twice in many rounds. Shares the gateway's slot, which a slash reads anyway.
         uint16 equivocationBps;
-        uint64 evidenceEpochs;
         mapping(bytes32 key => mapping(uint64 epoch => bool)) punished;
+        mapping(address => uint256) seizedPending; // taken by a slash, not yet sent home by `sendSeized`
     }
 
     // keccak256(abi.encode(uint256(keccak256("nvnm.staking.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -116,7 +114,6 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     /// @notice `validator` stands for election again, or has resigned and its bond unbonds.
     event CandidateSet(address indexed validator, bool active);
     event CommitteeConfigSet(uint256 maxSeats, uint256 acquiredWeight, uint256 maxDelegated);
-    event SlasherSet(address slasher);
     event MinAcquiredSet(uint256 minAcquired);
     event MinSeatsSet(uint256 minSeats);
     event UnbondingPeriodSet(uint256 period);
@@ -128,7 +125,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     event BondReceived(address indexed validator, uint256 amount, uint256 bond);
     event BondGatewaySet(address gateway);
     event Slashed(address indexed validator, uint256 bps, uint256 seized);
-    event EquivocationSet(uint256 bps, uint256 evidenceEpochs);
+    event SeizureSent(address indexed validator, uint256 amount);
+    event EquivocationSet(uint256 bps);
     event Equivocated(address indexed validator, uint64 epoch, uint64 viewNumber);
 
     // -- errors --------------------------------------------------------------
@@ -139,7 +137,6 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     error AlreadyCandidate();
     error NotCandidate();
     error InvalidPeriod();
-    error NotSlasher();
     error NothingToWithdraw();
     error StillUnbonding();
     error InvalidBps();
@@ -150,9 +147,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     error TooManySeats();
     error SlashingClosed();
     error NotBondGateway();
-    error EvidenceExpired();
     error AlreadySlashed();
     error NothingToSlash();
+    error NothingSeized();
 
     constructor() {
         _disableInitializers();
@@ -356,48 +353,41 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     // -- slashing ------------------------------------------------------------
-    /// @notice Slash `bps` of `validator`'s bond, once the election is configured (Phase 5), and
-    ///         seize as much of its bond on Ethereum. Delegated stake is untouched; a bond
-    ///         unbonding after a resignation is not. Only the slasher: the owner's delay would let
-    ///         the bond leave first. The slasher pays the bridge's fee (see {IBondGateway}).
-    function slash(address validator, uint256 bps) external nonReentrant returns (uint256 seized) {
-        StakingStorage storage $ = _s();
-        // An unset slasher must not admit address(0), which the node calls from.
-        if ($.slasher == address(0) || msg.sender != $.slasher) revert NotSlasher();
-        if (bps == 0 || bps > BPS) revert InvalidBps();
-        // The PoA phases have no validator-level slashing, bond or not.
-        if ($.maxSeats == 0) revert SlashingClosed();
-        return _slash($, validator, bps);
-    }
-
-    /// @notice Slash `equivocationBps` of the bond of the validator whose consensus key signed
-    ///         the conflicting votes in `evidence`, as the node's registry reads it. Anyone may
-    ///         bring it: once for a key and epoch, and while the epoch is no more than
-    ///         `evidenceEpochs` old. With no bond to slash it reverts, and the epoch stays open
-    ///         for one that arrives in time. You pay the bridge's fee (see {IBondGateway}) and
-    ///         are not paid back: what is seized burns, so bringing evidence is the validators'
-    ///         and the foundation's own interest, not a bounty.
+    /// @notice Slash `equivocationBps` of the bond of the validator whose key signed the
+    ///         conflicting votes in `evidence`, as the registry reads it, once the election is
+    ///         configured. Anyone may, once per key and epoch, for as long as the registry
+    ///         answers for the key; with no bond to slash it reverts and the epoch stays open.
+    ///         Delegated stake is untouched, an unbonding bond is not. Unpaid: what is seized
+    ///         burns, so bringing evidence is the validators' and the foundation's own interest.
     function slashEquivocation(bytes calldata evidence) external nonReentrant returns (uint256 seized) {
         StakingStorage storage $ = _s();
         uint256 bps = $.equivocationBps;
-        // Before asking the registry, which charges for the signatures it checks.
+        // Before asking the registry, which charges for the signatures it checks. The PoA phases
+        // have no validator-level slashing, bond or not.
         if (bps == 0 || $.maxSeats == 0) revert SlashingClosed();
-        (address validator, uint64 epoch, uint64 viewNumber, uint64 epochsAgo) =
-            IEquivocation(VALIDATOR_REGISTRY).equivocator(evidence);
-        if (epochsAgo > $.evidenceEpochs) revert EvidenceExpired();
+        (address validator, uint64 epoch, uint64 viewNumber) = IEquivocation(VALIDATOR_REGISTRY).equivocator(evidence);
         // The registry accepted the evidence, so it opens with the key that signed.
         mapping(uint64 => bool) storage punished = $.punished[bytes32(evidence[:32])];
         if (punished[epoch]) revert AlreadySlashed();
         punished[epoch] = true;
         emit Equivocated(validator, epoch, viewNumber);
-        seized = _slash($, validator, bps);
+        seized = ($.bondPaid[validator] * bps) / BPS;
         if (seized == 0) revert NothingToSlash();
+        emit Slashed(validator, bps, seized);
+        _debitBond($, validator, seized);
+        $.seizedPending[validator] += seized;
     }
 
-    function _slash(StakingStorage storage $, address validator, uint256 bps) private returns (uint256 seized) {
-        seized = ($.bondPaid[validator] * bps) / BPS;
-        emit Slashed(validator, bps, seized);
-        if (seized != 0) _debitBond($, validator, seized).seize(validator, seized, msg.sender);
+    /// @notice Send what slashing took of `validator`'s bond, and still sits here, to be seized
+    ///         on Ethereum. Anyone may; you pay the bridge's fee (see {IBondGateway}). Kept apart
+    ///         from the slash, so that evidence counts whatever state the bridge is in.
+    function sendSeized(address validator) external nonReentrant returns (uint256 amount) {
+        StakingStorage storage $ = _s();
+        amount = $.seizedPending[validator];
+        if (amount == 0) revert NothingSeized();
+        $.seizedPending[validator] = 0;
+        emit SeizureSent(validator, amount);
+        _approvedGateway($, amount).seize(validator, amount, msg.sender);
     }
 
     // -- candidacy -----------------------------------------------------------
@@ -429,7 +419,10 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         uint256 bond = $.bondPaid[validator];
         seized = amount.min(bond);
         emit Slashed(validator, bond == 0 ? 0 : (seized * BPS) / bond, seized);
-        if (seized != 0) _debitBond($, validator, seized);
+        if (seized != 0) {
+            _debitBond($, validator, seized);
+            _approvedGateway($, seized);
+        }
     }
 
     /// @notice Stand for election again on a bond of yours that is unbonding: the wait is
@@ -461,16 +454,20 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         amount = $.bondPaid[msg.sender];
         $.bondReleaseAt[msg.sender] = 0;
         emit BondWithdrawn(msg.sender, amount);
-        if (amount != 0) _debitBond($, msg.sender, amount).returnBond(msg.sender, amount, msg.sender);
+        if (amount != 0) {
+            _debitBond($, msg.sender, amount);
+            _approvedGateway($, amount).returnBond(msg.sender, amount, msg.sender);
+        }
     }
 
-    /// @dev Takes `amount` off `validator`'s bond and approves the gateway to burn it.
-    function _debitBond(StakingStorage storage $, address validator, uint256 amount)
-        private
-        returns (IBondGateway gateway)
-    {
+    /// @dev Takes `amount` off `validator`'s bond.
+    function _debitBond(StakingStorage storage $, address validator, uint256 amount) private {
         $.bondPaid[validator] -= amount;
         $.bonded -= amount;
+    }
+
+    /// @dev The gateway, approved to burn `amount` of the stake token held here.
+    function _approvedGateway(StakingStorage storage $, uint256 amount) private returns (IBondGateway gateway) {
         gateway = IBondGateway($.bondGateway);
         SafeTransferLib.safeApprove($.stakeToken, address(gateway), amount);
     }
@@ -516,22 +513,11 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         emit MinSeatsSet(minSeats_);
     }
 
-    /// @notice Who may slash; 0 closes slashing to everyone.
-    function setSlasher(address slasher_) external onlyOwner {
-        _s().slasher = slasher_;
-        emit SlasherSet(slasher_);
-    }
-
-    /// @notice What `slashEquivocation` takes of a bond, 0 closing it, and how many epochs old
-    ///         a round may be. Keep that shorter than the unbonding period, which is in seconds.
-    function setEquivocation(uint256 bps, uint256 evidenceEpochs_) external onlyOwner {
+    /// @notice What `slashEquivocation` takes of a bond; 0 closes it.
+    function setEquivocation(uint256 bps) external onlyOwner {
         if (bps > BPS) revert InvalidBps();
-        StakingStorage storage $ = _s();
-        $.equivocationBps = uint16(bps);
-        // No round is older than uint64 epochs, so the cap changes nothing.
-        uint64 epochs = uint64(evidenceEpochs_.min(type(uint64).max));
-        $.evidenceEpochs = epochs;
-        emit EquivocationSet(bps, epochs);
+        _s().equivocationBps = uint16(bps);
+        emit EquivocationSet(bps);
     }
 
     /// @notice The L1 bridge gateway that bonds arrive through and leave by.
@@ -681,16 +667,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         amount = releaseAt == 0 ? 0 : $.bondPaid[validator];
     }
 
-    function slasher() external view returns (address) {
-        return _s().slasher;
-    }
-
     function equivocationBps() external view returns (uint256) {
         return _s().equivocationBps;
-    }
-
-    function evidenceEpochs() external view returns (uint256) {
-        return _s().evidenceEpochs;
     }
 
     function bondGateway() external view returns (address) {
@@ -699,6 +677,11 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     function bondOf(address validator) external view returns (uint256) {
         return _s().bondPaid[validator];
+    }
+
+    /// @notice What slashing took of `validator`'s bond that `sendSeized` has not yet sent home.
+    function seizedPendingOf(address validator) external view returns (uint256) {
+        return _s().seizedPending[validator];
     }
 
     function minAcquired() external view returns (uint256) {
