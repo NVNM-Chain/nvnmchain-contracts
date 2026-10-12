@@ -7,7 +7,7 @@ import {NVNMStakingTestBase} from "./NVNMStaking.t.sol";
 /// @dev A slash the lockbox's own slasher made on Ethereum, as the gateway brings it here.
 contract NVNMStakingSlashFromBridgeTest is NVNMStakingTestBase {
     function test_a_slash_on_ethereum_drops_the_bond_and_its_weight() public {
-        _openRegistration(100 ether);
+        _openRegistration(50 ether);
         _bond(validator, 100 ether);
         _startElection();
         address[] memory who = new address[](1);

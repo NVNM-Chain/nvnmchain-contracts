@@ -65,16 +65,22 @@ abstract contract NVNMStakingTestBase is Test {
         vm.warp(vm.getBlockTimestamp() + staking.rewardDuration());
     }
 
-    /// @dev The committee with every candidate in the node's registry.
-    function _committee() internal view returns (address[] memory) {
-        return staking.computeCommittee(staking.candidates());
+    /// @dev The node's registry: the four addresses these tests stand, in registry order.
+    function _registry() internal view returns (address[] memory eligible) {
+        eligible = new address[](4);
+        (eligible[0], eligible[1], eligible[2], eligible[3]) = (validator, validator2, alice, bob);
     }
 
-    /// @dev Open bonded self-registration, under the 7-day unbonding period a bond requires.
+    /// @dev The committee elected from the registry.
+    function _committee() internal view returns (address[] memory) {
+        return staking.computeCommittee(_registry());
+    }
+
+    /// @dev Ask for a `bond` to stand, under the 7-day unbonding period a bond requires.
     function _openRegistration(uint256 bond) internal {
         vm.startPrank(owner);
         staking.setUnbondingPeriod(7 days);
-        staking.setCandidacyBond(bond);
+        staking.setMinAcquired(bond);
         vm.stopPrank();
     }
 
@@ -343,7 +349,6 @@ contract NVNMStakingTest is NVNMStakingTestBase {
     function test_unbonding_stakeStopsEarningAndElecting() public {
         vm.startPrank(owner);
         staking.setUnbondingPeriod(7 days);
-        staking.setCandidate(validator, true);
         staking.setCommitteeConfig(21, 1, 0);
         vm.stopPrank();
         _stake(alice, validator, 100 ether);
@@ -475,15 +480,13 @@ contract NVNMStakingTest is NVNMStakingTestBase {
 
         assertEq(gateway.seized(validator), 50 ether);
         vm.prank(validator);
-        staking.resignCandidate();
-        (uint256 pending,) = staking.pendingBondOf(validator);
-        assertEq(pending, 0, "already-seized bond is not returned");
+        vm.expectRevert(NVNMStaking.NotCandidate.selector);
+        staking.resignCandidate(); // nothing left to return
     }
 
     function test_slash_reducesElectionSeats() public {
         vm.startPrank(owner);
         staking.setUnbondingPeriod(7 days);
-        staking.setCandidate(validator, true);
         staking.setCommitteeConfig(21, 1, 0);
         vm.stopPrank();
         _stake(alice, validator, 300 ether);
@@ -524,38 +527,10 @@ contract NVNMStakingTest is NVNMStakingTestBase {
 }
 
 contract NVNMStakingElectionTest is NVNMStakingTestBase {
-    /// @dev Fills the candidate list to MAX_CANDIDATES via bonded self-registration.
-    function _fillCandidates() internal {
-        _openRegistration(1 ether);
-        for (uint256 i; i < 256; ++i) {
-            _bond(address(uint160(0x10000 + i)), 1 ether);
-        }
-    }
-
-    function test_candidacy_registrationCapped() public {
-        _fillCandidates();
-        _bond(alice, 1 ether);
-        assertEq(staking.bondOf(alice), 1 ether, "held, though it cannot stand");
-        vm.prank(alice);
-        vm.expectRevert(NVNMStaking.CandidateListFull.selector);
-        staking.registerCandidate();
-    }
-
-    function test_candidacy_ownerCurationCapped() public {
-        // The cap is what keeps the node's election read inside its gas budget, so owner
-        // curation is bounded by it too — not just permissionless registration.
-        _fillCandidates();
-        vm.prank(owner);
-        vm.expectRevert(NVNMStaking.CandidateListFull.selector);
-        staking.setCandidate(alice, true);
-    }
-
     // -- committee election --------------------------------------------------
     function _electionSetup() internal {
         vm.startPrank(owner);
         staking.setUnbondingPeriod(7 days);
-        staking.setCandidate(validator, true);
-        staking.setCandidate(validator2, true);
         staking.setCommitteeConfig(21, 1, 0); // top-21, equal acquired/delegated weight, no cap
         vm.stopPrank();
     }
@@ -573,9 +548,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
 
     function test_election_overweightsAcquiredStake() public {
         vm.startPrank(owner);
-        staking.setCandidate(validator, true);
         staking.setUnbondingPeriod(7 days);
-        staking.setCandidacyBond(50 ether);
         staking.setCommitteeConfig(21, 10, 0); // acquired counts 10x
         vm.stopPrank();
         _bond(validator2, 50 ether);
@@ -588,34 +561,31 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
 
     function test_election_weightIsTheElectionScore() public {
         vm.startPrank(owner);
-        staking.setCandidate(validator, true);
         staking.setUnbondingPeriod(7 days);
-        staking.setCandidacyBond(50 ether);
         staking.setCommitteeConfig(1, 10, 0); // one seat; acquired counts 10x
         vm.stopPrank();
         _bond(validator2, 50 ether);
         _stake(alice, validator, 400 ether);
-        _stake(bob, makeAddr("notACandidate"), 100 ether);
+        address outsider = makeAddr("outsideTheRegistry");
+        _stake(bob, outsider, 100 ether);
         vm.prank(owner);
         staking.setCommitteeConfig(1, 10, 300 ether); // the cap binds at the read
 
         address[] memory who = new address[](3);
-        (who[0], who[1], who[2]) = (validator2, validator, makeAddr("notACandidate"));
+        (who[0], who[1], who[2]) = (validator2, validator, outsider);
         uint256[] memory weights = staking.electionWeight(who);
         assertEq(_committee().length, 1, "one seat");
         assertEq(weights[0], 500 ether, "bond 50 at 10x");
         assertEq(weights[1], 300 ether, "outside the committee, still weighed: 400 capped at 300");
-        assertEq(weights[2], 0, "not a candidate");
+        assertEq(weights[2], 100 ether, "whoever the node asks about is weighed; the registry is its gate");
 
         vm.prank(owner);
         staking.setMinAcquired(60 ether);
         weights = staking.electionWeight(who);
-        assertEq(weights[0], 0, "below minAcquired");
+        assertEq(weights[0] + weights[1] + weights[2], 0, "below minAcquired, all of them");
     }
 
     function test_election_weightIsZeroUntilConfigured() public {
-        vm.prank(owner);
-        staking.setCandidate(validator, true);
         _stake(alice, validator, 100 ether);
         address[] memory who = new address[](1);
         who[0] = validator;
@@ -645,10 +615,42 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         assertEq(seats, 21);
     }
 
-    function test_election_excludesZeroWeightAndNonCandidates() public {
+    function test_election_anUnbondingBondWeighsNothing() public {
+        _openRegistration(50 ether);
+        _bond(validator, 50 ether);
+        _stake(alice, validator, 100 ether);
+        _startElection();
+        address[] memory who = new address[](1);
+        who[0] = validator;
+        assertEq(staking.electionWeight(who)[0], 150 ether);
+
+        vm.prank(validator);
+        staking.resignCandidate();
+        assertEq(staking.electionWeight(who)[0], 0, "out of the election the moment it unbonds");
+        assertEq(_committee().length, 0);
+        vm.prank(validator);
+        staking.registerCandidate();
+        assertEq(staking.electionWeight(who)[0], 150 ether, "and back the moment it stands again");
+    }
+
+    function test_election_takesTheRegistryAsItComes() public {
+        // Fewer eligible than seats, an address with nothing behind it, an address named twice:
+        // every weighted address gets one seat, heaviest first.
         _electionSetup();
-        address stranger = makeAddr("nonCandidate");
-        _stake(bob, stranger, 500 ether); // staked but not a candidate
+        _stake(alice, validator, 100 ether);
+        _stake(bob, validator2, 50 ether);
+        address[] memory eligible = new address[](4);
+        (eligible[0], eligible[1], eligible[2], eligible[3]) = (validator2, validator, validator, makeAddr("unstaked"));
+        address[] memory vals = staking.computeCommittee(eligible);
+        assertEq(vals.length, 2);
+        assertEq(vals[0], validator);
+        assertEq(vals[1], validator2);
+    }
+
+    function test_election_excludesZeroWeightAndAddressesOutsideTheRegistry() public {
+        _electionSetup();
+        address stranger = makeAddr("outsideTheRegistry");
+        _stake(bob, stranger, 500 ether); // staked, but not in the node's registry
 
         address[] memory vals = _committee();
         assertEq(vals.length, 0);
@@ -711,7 +713,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
 
         // Lowering the cap must clamp the incumbents' election weight too, or tightening
         // delegation influence exempts exactly the entrenched pools it targets. Both pools
-        // clamp to 50 and the tie falls back to candidate-list order.
+        // clamp to 50 and the tie falls back to registry order.
         vm.prank(owner);
         staking.setCommitteeConfig(21, 1, 50 ether);
         vals = _committee();
@@ -753,7 +755,6 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         // and the node maps it to a stalled epoch feed rather than the registry fallback.
         vm.startPrank(owner);
         staking.setUnbondingPeriod(7 days);
-        staking.setCandidacyBond(50 ether);
         staking.setCommitteeConfig(21, type(uint256).max, 0);
         vm.stopPrank();
         _bond(alice, 50 ether); // 50e18 bond x 2^256-1 weight overflows unchecked math
@@ -763,43 +764,16 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         assertEq(vals[0], alice);
     }
 
-    function test_election_candidateManagement() public {
-        vm.prank(owner);
-        staking.setCandidate(validator, true);
-        assertEq(staking.candidates().length, 1);
-
-        vm.prank(owner);
-        vm.expectRevert(NVNMStaking.AlreadyCandidate.selector);
-        staking.setCandidate(validator, true);
-
-        vm.prank(owner);
-        staking.setCandidate(validator, false);
-        assertEq(staking.candidates().length, 0);
-
-        // Removed candidate no longer electable even with stake.
-        vm.startPrank(owner);
-        staking.setUnbondingPeriod(7 days);
-        staking.setCommitteeConfig(21, 1, 0);
-        vm.stopPrank();
-        _stake(alice, validator, 300 ether);
-        address[] memory vals = _committee();
-        assertEq(vals.length, 0);
-    }
-
     /// Every election and exit knob is the owner's alone. One test, so a setter that loses
     /// `onlyOwner` fails here rather than nowhere.
     function test_onlyOwnerConfigures() public {
         vm.startPrank(makeAddr("stranger"));
-        vm.expectRevert(Ownable.Unauthorized.selector);
-        staking.setCandidate(validator, true);
         vm.expectRevert(Ownable.Unauthorized.selector);
         staking.setCommitteeConfig(1, 1, 0);
         vm.expectRevert(Ownable.Unauthorized.selector);
         staking.setMinAcquired(1 ether);
         vm.expectRevert(Ownable.Unauthorized.selector);
         staking.setMinSeats(3);
-        vm.expectRevert(Ownable.Unauthorized.selector);
-        staking.setCandidacyBond(1 ether);
         vm.expectRevert(Ownable.Unauthorized.selector);
         staking.setUnbondingPeriod(1 days);
         vm.expectRevert(Ownable.Unauthorized.selector);
@@ -814,11 +788,10 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         _openRegistration(50 ether);
 
         _bond(alice, 50 ether);
-        assertTrue(staking.candidates().length == 1 && staking.candidates()[0] == alice);
         assertEq(staking.bondOf(alice), 50 ether);
         assertEq(nvnm.balanceOf(alice), 1000 ether, "never taken from her balance here");
 
-        // Electable like any curated candidate.
+        // Electable by the bond alone, the registry willing.
         vm.prank(owner);
         staking.setCommitteeConfig(21, 1, 0);
         _stake(bob, alice, 100 ether);
@@ -826,31 +799,15 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         assertEq(vals[0], alice);
     }
 
-    function test_candidacy_closedWithoutBondConfig() public {
-        vm.prank(alice);
-        vm.expectRevert(NVNMStaking.CandidacyClosed.selector);
-        staking.registerCandidate();
-    }
-
     function test_candidacy_bondNeedsAnUnbondingPeriod() public {
         // With no period a resignation refunds at once, and an operator front-runs its own
-        // slash to walk away whole.
-        vm.startPrank(owner);
-        vm.expectRevert(NVNMStaking.UnbondingRequired.selector);
-        staking.setCandidacyBond(50 ether);
-        vm.stopPrank();
-
+        // slash to walk away whole: while a bond is posted the period cannot be zeroed.
         _openRegistration(50 ether);
         _bond(alice, 50 ether);
 
-        vm.startPrank(owner);
+        vm.prank(owner);
         vm.expectRevert(NVNMStaking.UnbondingRequired.selector);
         staking.setUnbondingPeriod(0);
-        // Closing registration does not free the bonds already posted.
-        staking.setCandidacyBond(0);
-        vm.expectRevert(NVNMStaking.UnbondingRequired.selector);
-        staking.setUnbondingPeriod(0);
-        vm.stopPrank();
 
         vm.prank(alice);
         staking.resignCandidate();
@@ -863,10 +820,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
 
     /// @dev Bond alice under a 7-day unbonding period and resign her.
     function _resignUnderUnbonding() internal {
-        vm.startPrank(owner);
-        staking.setUnbondingPeriod(7 days);
-        staking.setCandidacyBond(50 ether);
-        vm.stopPrank();
+        _openRegistration(50 ether);
         _bond(alice, 50 ether);
         vm.prank(alice);
         staking.resignCandidate();
@@ -875,7 +829,6 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     function test_candidacy_resignUnbondsBond() public {
         _resignUnderUnbonding();
 
-        assertEq(staking.candidates().length, 0, "candidacy ends immediately");
         assertEq(gateway.returned(alice), 0, "bond is not returned yet");
         (uint256 amount, uint256 releaseAt) = staking.pendingBondOf(alice);
         assertEq(amount, 50 ether);
@@ -911,14 +864,21 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     }
 
     function test_candidacy_reRegisteringCancelsTheUnbonding() public {
-        // The bond never left, so standing again needs no fresh one.
+        // The bond never left, so standing again needs no fresh one. Otherwise the clock keeps
+        // running while the validator is electable again, and `withdrawBond` pulls the bond out
+        // from under a live candidate.
         _resignUnderUnbonding();
 
         vm.prank(alice);
         staking.registerCandidate();
         (uint256 amount, uint256 releaseAt) = staking.pendingBondOf(alice);
         assertEq(amount + releaseAt, 0, "no longer unbonding");
-        assertEq(staking.candidates()[0], alice);
+        assertEq(staking.bondOf(alice), 50 ether, "the bond is still posted and at risk");
+
+        vm.warp(block.timestamp + 7 days);
+        vm.prank(alice);
+        vm.expectRevert(NVNMStaking.NothingToWithdraw.selector);
+        staking.withdrawBond();
     }
 
     function test_election_minAcquiredExcludesUnbondedCandidates() public {
@@ -927,8 +887,6 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vm.startPrank(owner);
         staking.setUnbondingPeriod(7 days);
         staking.setCommitteeConfig(21, 1, 0);
-        staking.setCandidacyBond(50 ether);
-        staking.setCandidate(validator, true); // curated, posts no bond
         staking.setMinAcquired(50 ether);
         vm.stopPrank();
         _stake(alice, validator, 500 ether); // heavily delegated, still unbonded
@@ -944,11 +902,10 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
     }
 
     function test_election_minAcquiredDefaultsOff() public {
-        // The PoA phases curate candidates directly with no bond posted.
+        // The PoA phases post no bond: the registry's owner curates, and delegation elects.
         vm.startPrank(owner);
         staking.setUnbondingPeriod(7 days);
         staking.setCommitteeConfig(21, 1, 0);
-        staking.setCandidate(validator, true);
         vm.stopPrank();
         _stake(alice, validator, 100 ether);
 
@@ -982,42 +939,10 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         assertEq(vals.length, 0, "a resigned candidate is not electable on an unbonding bond");
     }
 
-    function test_candidacy_reAddingCancelsTheUnbonding() public {
-        // Otherwise the clock keeps running while the validator is electable again, and
-        // `withdrawBond` pulls the bond out from under a live candidate.
-        _resignUnderUnbonding();
-        vm.prank(owner);
-        staking.setCandidate(alice, true);
-
-        (uint256 amount, uint256 releaseAt) = staking.pendingBondOf(alice);
-        assertEq(amount + releaseAt, 0, "no longer unbonding");
-        assertEq(staking.bondOf(alice), 50 ether, "the bond is still posted and at risk");
-
-        vm.warp(block.timestamp + 7 days);
-        vm.prank(alice);
-        vm.expectRevert(NVNMStaking.NothingToWithdraw.selector);
-        staking.withdrawBond();
-    }
-
     function test_withdrawBond_nothingToWithdrawReverts() public {
         vm.prank(alice);
         vm.expectRevert(NVNMStaking.NothingToWithdraw.selector);
         staking.withdrawBond();
-    }
-
-    function test_candidacy_ownerKickUnbondsBond() public {
-        _openRegistration(50 ether);
-        _bond(alice, 50 ether);
-
-        vm.prank(owner);
-        staking.setCandidate(alice, false);
-        (uint256 amount,) = staking.pendingBondOf(alice);
-        assertEq(amount, 50 ether, "a kicked candidate's bond unbonds like a resigned one's");
-
-        vm.warp(block.timestamp + 7 days);
-        vm.prank(alice);
-        staking.withdrawBond();
-        assertEq(gateway.returned(alice), 50 ether);
     }
 
     function test_candidacy_bondChangeDoesNotAffectHeldBonds() public {
@@ -1025,7 +950,7 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         _bond(alice, 50 ether);
 
         vm.prank(owner);
-        staking.setCandidacyBond(500 ether); // raise after alice registered
+        staking.setMinAcquired(500 ether); // raised after alice bonded: she cannot stand, but keeps her bond
         vm.prank(alice);
         staking.resignCandidate();
         vm.warp(block.timestamp + 7 days);
@@ -1037,13 +962,16 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         _openRegistration(50 ether);
         _bond(alice, 50 ether);
 
+        // Standing already, there is nothing to stand again for; with no bond, nothing to resign.
         vm.prank(alice);
         vm.expectRevert(NVNMStaking.AlreadyCandidate.selector);
         staking.registerCandidate();
-
         vm.prank(bob);
         vm.expectRevert(NVNMStaking.NotCandidate.selector);
         staking.resignCandidate();
+        vm.prank(bob);
+        vm.expectRevert(NVNMStaking.AlreadyCandidate.selector);
+        staking.registerCandidate();
     }
 
     function test_bondFromBridge_onlyTheGateway() public {
@@ -1054,14 +982,15 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
 
     function test_candidacy_aBondBelowTheBarStandsOnceItReachesIt() public {
         _openRegistration(50 ether);
-        _bond(alice, 30 ether);
-        assertEq(staking.candidates().length, 0, "not yet");
-        vm.prank(alice);
-        vm.expectRevert(NVNMStaking.BondTooSmall.selector);
-        staking.registerCandidate();
+        vm.prank(owner);
+        staking.setCommitteeConfig(21, 1, 0);
+        address[] memory who = new address[](1);
+        who[0] = alice;
 
+        _bond(alice, 30 ether);
+        assertEq(staking.electionWeight(who)[0], 0, "not yet");
         _bond(alice, 20 ether);
-        assertEq(staking.candidates()[0], alice);
+        assertEq(staking.electionWeight(who)[0], 50 ether);
         assertEq(staking.bondOf(alice), 50 ether);
     }
 
@@ -1069,9 +998,8 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         // It is already locked on Ethereum: a delivery that reverted would leave it there unrecorded.
         vm.prank(owner);
         staking.setUnbondingPeriod(7 days);
-        _bond(bob, 50 ether); // candidacy closed
+        _bond(bob, 50 ether); // no election configured
         assertEq(staking.bondOf(bob), 50 ether);
-        assertEq(staking.candidates().length, 0);
 
         _resignUnderUnbonding();
         _bond(alice, 10 ether);

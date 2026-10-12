@@ -20,8 +20,9 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 ///      resigning validator would withdraw its bond before a queued slash; `slash` seizes only
 ///      the validator's acquired bond — delegators are never slashed. Ethereum's lockbox has a
 ///      slasher of its own, for the slash this chain's validators would not carry, and
-///      `slashFromBridge` keeps the books here in step. Election is top-N by
-///      `acquired * acquiredWeight + delegated`. Each seat votes once; the node draws block
+///      `slashFromBridge` keeps the books here in step. Election is top-N of the node's registry
+///      by `acquired * acquiredWeight + delegated`: the registry's owner curates who may stand,
+///      a bond at `minAcquired` makes one electable. Each seat votes once; the node draws block
 ///      proposers by the same score (`electionWeight`). Stake and bond both exit through the
 ///      unbonding period.
 contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard {
@@ -34,7 +35,6 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     // times the victim's deposit to round it to zero.
     uint256 private constant VIRTUAL_SHARES = 1e3;
     uint256 private constant VIRTUAL_STAKE = 1;
-    uint256 private constant MAX_CANDIDATES = 256; // bounds the consensus-facing election scan
     uint256 private constant MAX_SEATS = 21; // the validator set's cap
     uint256 private constant MAX_UNBONDING = 14 days; // the longest exit; the owner's timelock waits longer
     uint256 private constant MAX_REWARD_DURATION = 30 days;
@@ -60,16 +60,13 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         // is withdrawable after the delay
         uint256 unbondingPeriod; // seconds; 0 = immediate
         mapping(address => mapping(address => Unbonding)) unstaking; // validator => user => bucket
-        // candidacy: owner curation, or permissionless self-registration against an NVNM bond
-        address[] candidates; // electable validators
-        mapping(address => uint256) candidateIndex; // 1-based position in `candidates`; 0 = none
-        uint256 candidacyBond; // 0 = self-registration closed
-        mapping(address => uint256) bondPaid; // candidate => acquired stake
-        // A departing candidate's bond stays in `bondPaid`, and so stays slashable, until
+        // candidacy: a bond bridged in from Ethereum, held by the validator's address
+        mapping(address => uint256) bondPaid; // validator => acquired stake
+        // A departing validator's bond stays in `bondPaid`, and so stays slashable, until
         // `withdrawBond`. Otherwise an operator front-runs its own slash by resigning.
-        mapping(address => uint256) bondReleaseAt; // candidate => withdrawable-from timestamp
-        // election: top-`maxSeats` by acquired * acquiredWeight + delegated, one seat each.
-        // maxSeats 0 = unconfigured; acquiredWeight 0 means 1; maxDelegated 0 = uncapped.
+        mapping(address => uint256) bondReleaseAt; // validator => withdrawable-from timestamp
+        // election: top-`maxSeats` of the registry by acquired * acquiredWeight + delegated, one
+        // seat each. maxSeats 0 = unconfigured; acquiredWeight 0 means 1; maxDelegated 0 = uncapped.
         // minAcquired is the 1M NVNM floor: below it, delegation alone never buys a seat.
         uint256 maxSeats;
         uint256 acquiredWeight;
@@ -116,9 +113,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     event RewardDeposited(address indexed validator, address indexed from, uint256 amount);
     event RewardClaimed(address indexed validator, address indexed user, uint256 amount);
     event RewardCompounded(address indexed validator, address indexed from, uint256 amount);
+    /// @notice `validator` stands for election again, or has resigned and its bond unbonds.
     event CandidateSet(address indexed validator, bool active);
     event CommitteeConfigSet(uint256 maxSeats, uint256 acquiredWeight, uint256 maxDelegated);
-    event CandidacyBondSet(uint256 bond);
     event SlasherSet(address slasher);
     event MinAcquiredSet(uint256 minAcquired);
     event MinSeatsSet(uint256 minSeats);
@@ -145,17 +142,14 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     error NotSlasher();
     error NothingToWithdraw();
     error StillUnbonding();
-    error CandidacyClosed();
     error InvalidBps();
     error PoolCollapsed();
     error ZeroShares();
-    error CandidateListFull();
     error DelegationCap();
     error UnbondingRequired();
     error TooManySeats();
     error SlashingClosed();
     error NotBondGateway();
-    error BondTooSmall();
     error EvidenceExpired();
     error AlreadySlashed();
     error NothingToSlash();
@@ -240,13 +234,11 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     /// @notice The exit delay for stake and bonds alike, applied to future exits only. Should
     ///         be at least one epoch once the election feeds consensus, and cannot be 0 while
-    ///         the election is configured, self-registration is open or a bond is posted.
+    ///         the election is configured or a bond is posted.
     function setUnbondingPeriod(uint256 period) external onlyOwner {
         if (period > MAX_UNBONDING) revert InvalidPeriod();
         StakingStorage storage $ = _s();
-        if (period == 0 && ($.maxSeats != 0 || $.candidacyBond != 0 || $.bonded != 0)) {
-            revert UnbondingRequired();
-        }
+        if (period == 0 && ($.maxSeats != 0 || $.bonded != 0)) revert UnbondingRequired();
         $.unbondingPeriod = period;
         emit UnbondingPeriodSet(period);
     }
@@ -409,22 +401,10 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     }
 
     // -- candidacy -----------------------------------------------------------
-    /// @notice Add or remove an electable validator. Owner curation posts no bond; any bond
-    ///         already held exits through `_removeCandidate`.
-    function setCandidate(address validator, bool active) external onlyOwner {
-        if (validator == address(0)) revert ZeroAddress();
-        if (active) {
-            _addCandidate(validator);
-        } else {
-            _removeCandidate(validator);
-        }
-    }
-
     /// @notice `amount` more of `validator`'s bond, pulled from the gateway, which has just
-    ///         minted it from `validator`'s bond on Ethereum and approved it. Stands `validator`
-    ///         for election once the bond reaches `candidacyBond`, if nothing else stops it.
-    ///         Joining an unbonding bond, it restarts the wait: otherwise it leaves with a matured
-    ///         one in the block it arrives.
+    ///         minted it from `validator`'s bond on Ethereum and approved it. At `minAcquired`
+    ///         it stands `validator` for election by itself. Joining an unbonding bond, it
+    ///         restarts the wait: otherwise it leaves with a matured one in the block it arrives.
     /// @dev Books only what arrives: a gateway that minted nothing books no bond. Beyond that it
     ///      never reverts for the bond's sake, which is already locked on Ethereum, and a delivery
     ///      that reverted would leave there with no record here. The gateway must deliver a bond
@@ -437,14 +417,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         $.bondPaid[validator] = bond;
         $.bonded += amount;
         emit BondReceived(validator, amount, bond);
-        if ($.bondReleaseAt[validator] != 0) {
-            _unbondBond($, validator);
-        } else if (
-            $.candidacyBond != 0 && bond >= $.candidacyBond && $.candidateIndex[validator] == 0
-                && $.candidates.length < MAX_CANDIDATES
-        ) {
-            _addCandidate(validator);
-        }
+        if ($.bondReleaseAt[validator] != 0) _unbondBond($, validator);
     }
 
     /// @notice Drop up to `amount` of `validator`'s bond, which the lockbox's own slasher has
@@ -459,23 +432,22 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         if (seized != 0) _debitBond($, validator, seized);
     }
 
-    /// @notice Stand for election on a bond bridged in at least `candidacyBond` deep, as one that
-    ///         arrived while the list was full or the bond was unbonding. Cancels the unbonding.
+    /// @notice Stand for election again on a bond of yours that is unbonding: the wait is
+    ///         cancelled, and the bond is at risk again.
     function registerCandidate() external nonReentrant {
         StakingStorage storage $ = _s();
-        uint256 bond = $.candidacyBond;
-        if (bond == 0) revert CandidacyClosed();
-        if ($.bondPaid[msg.sender] < bond) revert BondTooSmall();
-        _addCandidate(msg.sender);
+        if ($.bondPaid[msg.sender] == 0 || $.bondReleaseAt[msg.sender] == 0) revert AlreadyCandidate();
+        $.bondReleaseAt[msg.sender] = 0;
+        emit CandidateSet(msg.sender, true);
     }
 
-    /// @notice Leave the election, or give up a bond that never stood: either way the bond
-    ///         unbonds, to be sent home with `withdrawBond`.
+    /// @notice Leave the election: your bond unbonds, to be sent home with `withdrawBond`.
+    ///         Election weight ends at once; the bond stays slashable until then.
     function resignCandidate() external nonReentrant {
         StakingStorage storage $ = _s();
-        if ($.candidateIndex[msg.sender] != 0) return _removeCandidate(msg.sender);
         if ($.bondPaid[msg.sender] == 0 || $.bondReleaseAt[msg.sender] != 0) revert NotCandidate();
         _unbondBond($, msg.sender);
+        emit CandidateSet(msg.sender, false);
     }
 
     /// @notice Send your matured bond, net of any slashing during unbonding, home to Ethereum,
@@ -501,34 +473,6 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         $.bonded -= amount;
         gateway = IBondGateway($.bondGateway);
         SafeTransferLib.safeApprove($.stakeToken, address(gateway), amount);
-    }
-
-    function _addCandidate(address validator) private {
-        StakingStorage storage $ = _s();
-        if ($.candidateIndex[validator] != 0) revert AlreadyCandidate();
-        // The consensus layer calls computeCommittee() every epoch under a fixed gas budget,
-        // and this bound is what keeps that read inside it.
-        if ($.candidates.length >= MAX_CANDIDATES) revert CandidateListFull();
-        // Electable again means at risk again; otherwise `withdrawBond` drains a live bond.
-        $.bondReleaseAt[validator] = 0;
-        $.candidates.push(validator);
-        $.candidateIndex[validator] = $.candidates.length;
-        emit CandidateSet(validator, true);
-    }
-
-    /// @dev Election weight ends at once; the bond stays slashable until `withdrawBond`.
-    function _removeCandidate(address validator) private {
-        StakingStorage storage $ = _s();
-        uint256 idx = $.candidateIndex[validator];
-        if (idx == 0) revert NotCandidate();
-        address[] storage list = $.candidates;
-        address last = list[list.length - 1];
-        list[idx - 1] = last;
-        $.candidateIndex[last] = idx;
-        list.pop();
-        $.candidateIndex[validator] = 0;
-        emit CandidateSet(validator, false);
-        if ($.bondPaid[validator] != 0) _unbondBond($, validator);
     }
 
     function _unbondBond(StakingStorage storage $, address validator) private {
@@ -596,44 +540,56 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         emit BondGatewaySet(gateway);
     }
 
-    /// @notice Set the NVNM bond for permissionless candidacy (0 closes self-registration).
-    ///         Needs a nonzero unbonding period, so a bond outlasts the slash meant for it.
-    function setCandidacyBond(uint256 bond) external onlyOwner {
-        StakingStorage storage $ = _s();
-        if (bond != 0 && $.unbondingPeriod == 0) revert UnbondingRequired();
-        $.candidacyBond = bond;
-        emit CandidacyBondSet(bond);
-    }
-
-    /// @notice Top-`maxSeats` candidates in `eligible` by `bond * acquiredWeight + delegated`, one
-    ///         equal seat each. Candidates below `minAcquired`, or weighing zero, are dropped; ties
-    ///         keep candidate-list order. Unconfigured, or below `minSeats`, elects nobody.
+    /// @notice Top-`maxSeats` of `eligible` by `bond * acquiredWeight + delegated`, one equal
+    ///         seat each. Those below `minAcquired`, unbonding, or weighing zero are dropped; ties
+    ///         keep `eligible`'s order. Unconfigured, or below `minSeats`, elects nobody.
     /// @dev The consensus layer reads this at a chosen block, and that read is the snapshot.
     ///      Electing nobody must return empty rather than revert: a revert reads as a node-local
     ///      failure and stalls one node's epoch feed, where empty sends them all to the same
     ///      fallback.
-    /// @param eligible Who the node can seat: its validator registry. Anyone else is dropped
-    ///        before the cut, or a candidate the node cannot seat takes a seat nobody fills.
+    /// @param eligible Who the node can seat: its validator registry, in its order, whose owner
+    ///        curates who may stand at all.
     function computeCommittee(address[] calldata eligible) external view returns (address[] memory vals) {
         StakingStorage storage $ = _s();
         uint256 maxSeats = $.maxSeats;
         if (maxSeats == 0) return vals;
+        (uint256 weightMul, uint256 floor, uint256 cap) = _weighing($);
 
-        (address[] memory cv, uint256[] memory cweight, uint256 m) = _weighCandidates($, eligible);
-        _sortByWeightDesc(cv, cweight, m);
-
-        uint256 count = m.min(maxSeats);
+        // The heaviest so far, heaviest first: `m` of them, up to `maxSeats`.
+        address[] memory top = new address[](maxSeats);
+        uint256[] memory weight = new uint256[](maxSeats);
+        uint256 m;
+        for (uint256 i; i < eligible.length; ++i) {
+            address c = eligible[i];
+            uint256 w = _standingScore($, c, weightMul, floor, cap);
+            if (w == 0) continue;
+            // Only strictly heavier than the lightest kept displaces it: an earlier tie keeps its seat.
+            if (m == maxSeats && w <= weight[m - 1]) continue;
+            // The registry names an address once; this read stays total if ever it did not.
+            bool kept;
+            for (uint256 k; k < m && !kept; ++k) {
+                kept = top[k] == c;
+            }
+            if (kept) continue;
+            uint256 j = m < maxSeats ? m++ : maxSeats - 1;
+            for (; j > 0 && weight[j - 1] < w; --j) {
+                top[j] = top[j - 1];
+                weight[j] = weight[j - 1];
+            }
+            top[j] = c;
+            weight[j] = w;
+        }
         // Below the viability floor the election seats nobody: better every node falls back to
-        // the full registry together than run consensus on a committee governance calls unsafe.
-        if (count < $.minSeats) return vals;
-        vals = new address[](count);
-        for (uint256 i; i < count; ++i) {
-            vals[i] = cv[i];
+        // the registry together than run consensus on a committee governance calls unsafe.
+        if (m < $.minSeats) return vals;
+        vals = new address[](m);
+        for (uint256 i; i < m; ++i) {
+            vals[i] = top[i];
         }
     }
 
     /// @notice Each of `who`'s election score, as `computeCommittee` ranks by. Zero for an
-    ///         address it would not rank (not a candidate, or below `minAcquired`) and for every
+    ///         address it would not rank (below `minAcquired`, or unbonding) and for every
     ///         address while the election is unconfigured. The node draws block proposers by it.
     /// @dev Not cut to the committee: the node asks about the keys that hold this epoch's
     ///      shares, which the election may rank outside it by now.
@@ -643,30 +599,18 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         if ($.maxSeats == 0) return weights;
         (uint256 weightMul, uint256 floor, uint256 cap) = _weighing($);
         for (uint256 i; i < who.length; ++i) {
-            if ($.candidateIndex[who[i]] != 0) weights[i] = _score($, who[i], weightMul, floor, cap);
+            weights[i] = _standingScore($, who[i], weightMul, floor, cap);
         }
     }
 
-    /// @dev Electable candidates and their weights, in candidate-list order. `m` entries are
-    ///      live; the arrays are sized for the whole list.
-    function _weighCandidates(StakingStorage storage $, address[] calldata eligible)
+    /// @dev `c`'s score while it stands: 0 once its bond is unbonding.
+    function _standingScore(StakingStorage storage $, address c, uint256 weightMul, uint256 floor, uint256 cap)
         private
         view
-        returns (address[] memory cv, uint256[] memory cweight, uint256 m)
+        returns (uint256)
     {
-        (uint256 weightMul, uint256 floor, uint256 cap) = _weighing($);
-        uint256 n = $.candidates.length;
-        cv = new address[](n);
-        cweight = new uint256[](n);
-        for (uint256 i; i < n; ++i) {
-            address c = $.candidates[i];
-            if (!_contains(eligible, c)) continue;
-            uint256 w = _score($, c, weightMul, floor, cap);
-            if (w == 0) continue;
-            cv[m] = c;
-            cweight[m] = w;
-            ++m;
-        }
+        if ($.bondReleaseAt[c] != 0) return 0;
+        return _score($, c, weightMul, floor, cap);
     }
 
     /// @dev The election's knobs with their defaults applied: an unset weight is 1, an unset cap
@@ -690,30 +634,6 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         // overflow would be a deterministic revert, which the node maps to a stalled epoch feed
         // rather than the registry fallback.
         return acquired.saturatingMul(weightMul).saturatingAdd($.totalStaked[c].min(cap));
-    }
-
-    /// @dev A linear scan: `eligible` is the node's registry, and candidates are capped at 256.
-    function _contains(address[] calldata list, address a) private pure returns (bool) {
-        for (uint256 i; i < list.length; ++i) {
-            if (list[i] == a) return true;
-        }
-        return false;
-    }
-
-    /// @dev Insertion sort over the first `m` entries, heaviest first. Stable, so ties keep
-    ///      candidate-list order, and `m` is bounded by `MAX_CANDIDATES`.
-    function _sortByWeightDesc(address[] memory cv, uint256[] memory cweight, uint256 m) private pure {
-        for (uint256 i = 1; i < m; ++i) {
-            address v = cv[i];
-            uint256 s = cweight[i];
-            uint256 j = i;
-            for (; j > 0 && cweight[j - 1] < s; --j) {
-                cv[j] = cv[j - 1];
-                cweight[j] = cweight[j - 1];
-            }
-            cv[j] = v;
-            cweight[j] = s;
-        }
     }
 
     // -- views ---------------------------------------------------------------
@@ -779,14 +699,6 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     function bondOf(address validator) external view returns (uint256) {
         return _s().bondPaid[validator];
-    }
-
-    function candidates() external view returns (address[] memory) {
-        return _s().candidates;
-    }
-
-    function candidacyBond() external view returns (uint256) {
-        return _s().candidacyBond;
     }
 
     function minAcquired() external view returns (uint256) {

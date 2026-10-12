@@ -27,10 +27,10 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   once a majority has backed it for `splitDelay`, and before commencement may neither raise
   devshare nor cut the validator share.
 - **NVNMStaking** — per-validator share pools, and the committee election the node reads:
-  top-N (at most 21) by `acquired * acquiredWeight + delegated`, one equal seat each.
-  `candidacyBond` is the 1M NVNM acquired stake, which `minAcquired` enforces at election
-  time; below `minSeats` the election returns nobody, and the node then applies its own
-  floor, `min(4, registry)`. Slashing takes only the bond, once the election is configured:
+  top-N (at most 21) of the node's registry by `acquired * acquiredWeight + delegated`, one
+  equal seat each, ties in registry order. `minAcquired` is the 1M NVNM acquired stake a
+  seat takes; below `minSeats` the election returns nobody, and the node then applies its
+  own floor, `min(4, registry)`. Slashing takes only the bond, once the election is configured:
   the `slasher` at will, anyone with the registry's evidence of conflicting votes
   (`slashEquivocation`, unpaid: the seized bond burns), and the lockbox's own slasher on
   Ethereum, which `slashFromBridge` follows here.
@@ -56,7 +56,7 @@ router at one sentinel gives a single shared pool — no operator to choose, and
 `earned` call for the lot. That suits Phases 1–4, which have no holder staking to
 allocate.
 
-It costs the election: `totalStaked` is then zero for every candidate, so
+It costs the election: `totalStaked` is then zero for every validator, so
 `computeCommittee` ranks on the bond alone and `acquiredWeight` and `maxDelegated`
 bind on nothing. Per-validator pools turn both back on by configuration rather than
 migration, which is why pools stay keyed per address.
