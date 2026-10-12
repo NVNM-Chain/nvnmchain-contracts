@@ -36,13 +36,14 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   anyone with the registry's evidence of conflicting votes (`slashEquivocation`, unpaid: the
   seized bond burns), and the lockbox's own slasher on Ethereum, which `slashFromBridge`
   follows here.
-- **GuardedSwapper** — buyback-market wrapper: a per-swap size cap and a two-sided price
-  floor, so a sandwiched pool makes the swap revert instead of donating the buyback. Only
-  the factory's routers may swap, not the owner.
+- **GuardedSwapper** — buyback-market wrapper: a per-swap size cap and a price floor, the
+  owner-seeded reference less a band, so a sandwiched pool makes the swap revert instead of
+  donating the buyback; a market that has moved past the band waits for a reseed. Only the
+  factory's routers may swap, not the owner.
 - **BridgedNVNM** — L1 ERC-20; only Safe-curated BRIDGE adapters mint/burn.
 
-Each contract's own NatSpec carries the rest — why `flush` takes a token, why the EMA
-floor is two-sided, why a departing bond stays slashable.
+Each contract's own NatSpec carries the rest — why `flush` takes a token, why the floor is
+a seeded price and nothing that follows the market, why a departing bond stays slashable.
 
 Two things the phase plan needs that these contracts do not enforce: a router for each
 validator (from T12, where genesis names the factory as `feeRouterFactory`, the node pays a

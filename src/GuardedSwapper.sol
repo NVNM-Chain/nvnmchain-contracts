@@ -6,23 +6,21 @@ import {FeeRouterFactory} from "./FeeRouter.sol";
 import {ISwapper} from "./interfaces/ISwapper.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
-import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 /// @title GuardedSwapper
 /// @notice The `ISwapper` fee buybacks run through: one fixed (tokenIn → tokenOut) pair behind a
 ///         per-swap size cap and a minimum execution price, so a sandwiched pool makes the swap
 ///         revert instead of donating the buyback. Routers hold the funds and retry.
-/// @dev The floor is two-sided and both legs bind. `maxDeviationBps` against the EMA absorbs
-///      honest drift; `maxDriftBps` against the owner-seeded `refPrice` is what stops the EMA
-///      being walked down, since alone it decays with the price it guards. The EMA never rises
-///      past `refPrice` either, so the floor follows a higher market only once the owner reseeds.
+/// @dev The floor is the owner-seeded `refPrice` less `maxDriftBps`, and moves only when the
+///      owner reseeds. A market that has fallen past the band waits, held on the routers; one
+///      that has risen is bought down to the old floor until the reseed, which is the owner's
+///      watch. Nothing here follows the price, so nothing here can be walked.
 ///
-///      `swap` is routers-only because moving the EMA is otherwise near-free: a direct caller,
-///      the owner included, keeps the output, where a router's goes to the buyback sink. Anyone
-///      may create a router for itself, so the gate makes that costly rather than impossible. It
-///      is also guarded: the inner market runs before the EMA moves, and a market re-entering
-///      through another router would otherwise be judged against the stale price.
+///      `swap` is routers-only: the buyback market is the flush path's, not a public venue, and
+///      the gate keeps the inner market's allowance and whatever this contract holds to it. It
+///      is also guarded: a market re-entering through another router would be read across the
+///      balances this swap is measured by.
 contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
     uint256 private constant WAD = 1e18;
 
@@ -32,17 +30,14 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
     address public inner; // the actual market
     address public routerFactory; // FeeRouterFactory whose routers may swap
     uint256 public maxAmountIn; // per-swap size cap
-    uint256 public maxDeviationBps; // allowed drop below the EMA execution price
     uint256 public maxDriftBps; // allowed drop below the seeded reference price
-    uint256 public emaAlphaBps; // EMA weight of the newest observation
-    uint256 public emaPrice; // tokenOut per WAD tokenIn; 0 until seeded
-    uint256 public refPrice; // owner-seeded reference; the EMA stays between its band and it
+    uint256 public refPrice; // owner-seeded reference, tokenOut per WAD tokenIn; 0 until seeded
 
-    event GuardsSet(address inner, uint256 maxAmountIn, uint256 maxDeviationBps, uint256 emaAlphaBps);
+    event GuardsSet(address inner, uint256 maxAmountIn);
     event DriftBandSet(uint256 maxDriftBps);
     event RouterFactorySet(address routerFactory);
     event PriceSeeded(uint256 price);
-    event GuardedSwap(uint256 amountIn, uint256 amountOut, uint256 price, uint256 emaPrice);
+    event GuardedSwap(uint256 amountIn, uint256 amountOut, uint256 price);
 
     error WrongPair();
     error NotSeeded();
@@ -59,24 +54,17 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
         tokenOut = tokenOut_;
     }
 
-    function setGuards(address inner_, uint256 maxAmountIn_, uint256 maxDeviationBps_, uint256 emaAlphaBps_)
-        external
-        onlyOwner
-    {
-        if (maxDeviationBps_ > BPS || emaAlphaBps_ > BPS) {
-            revert InvalidBps();
-        }
+    function setGuards(address inner_, uint256 maxAmountIn_) external onlyOwner {
         inner = inner_;
         maxAmountIn = maxAmountIn_;
-        maxDeviationBps = maxDeviationBps_;
-        emaAlphaBps = emaAlphaBps_;
-        emit GuardsSet(inner_, maxAmountIn_, maxDeviationBps_, emaAlphaBps_);
+        emit GuardsSet(inner_, maxAmountIn_);
     }
 
-    /// @notice How far below `refPrice` execution may fall, however far the EMA has drifted.
-    ///         0 pins the floor to `refPrice`; BPS disables this leg.
+    /// @notice How far below `refPrice` execution may fall. 0 pins the floor to `refPrice`, which
+    ///         a pool's own price impact falls short of, so set a band; BPS would be no floor at
+    ///         all, and is refused.
     function setDriftBand(uint256 maxDriftBps_) external onlyOwner {
-        if (maxDriftBps_ > BPS) revert InvalidBps();
+        if (maxDriftBps_ >= BPS) revert InvalidBps();
         maxDriftBps = maxDriftBps_;
         emit DriftBandSet(maxDriftBps_);
     }
@@ -87,9 +75,8 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
         emit RouterFactorySet(routerFactory_);
     }
 
-    /// @notice Seed or reset both the reference price and the EMA (tokenOut per 1e18 tokenIn).
+    /// @notice Seed or reset the reference price (tokenOut per 1e18 tokenIn).
     function seedPrice(uint256 price) external onlyOwner {
-        emaPrice = price;
         refPrice = price;
         emit PriceSeeded(price);
     }
@@ -101,9 +88,9 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
     {
         if (!_authorized(msg.sender)) revert NotAuthorized();
         if (tokenIn_ != tokenIn || tokenOut_ != tokenOut) revert WrongPair();
-        uint256 ema = emaPrice;
+        uint256 ref = refPrice;
         address market = inner;
-        if (market == address(0) || ema == 0) revert NotSeeded();
+        if (market == address(0) || ref == 0) revert NotSeeded();
         if (amountIn == 0) revert ZeroAmount();
         if (amountIn > maxAmountIn) revert AmountTooLarge();
 
@@ -119,21 +106,9 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
         out = SafeTransferLib.balanceOf(tokenOut, address(this)) - held;
 
         uint256 price = (out * WAD) / amountIn;
-        uint256 ref = refPrice;
-        // Whichever floor binds harder. Every accepted price clears the reference floor, so the
-        // EMA — a convex combination of accepted prices and its own past — cannot sink below it.
-        uint256 floorPrice =
-            FixedPointMathLib.max((ema * (BPS - maxDeviationBps)) / BPS, (ref * (BPS - maxDriftBps)) / BPS);
-        if (price < floorPrice) revert PriceBelowFloor();
-
-        // A high print pays out in full but pulls on the EMA only inside the band, and never
-        // past the reference: a run of manipulated prints would otherwise walk the floor above
-        // the honest price, where every swap reverts until the owner reseeds.
-        uint256 emaInput = FixedPointMathLib.min(price, (ema * (BPS + maxDeviationBps)) / BPS);
-        emaInput = FixedPointMathLib.min(emaInput, ref);
-        emaPrice = (emaInput * emaAlphaBps + ema * (BPS - emaAlphaBps)) / BPS;
+        if (price < (ref * (BPS - maxDriftBps)) / BPS) revert PriceBelowFloor();
         SafeTransferLib.safeTransfer(tokenOut, msg.sender, out);
-        emit GuardedSwap(amountIn, out, price, emaPrice);
+        emit GuardedSwap(amountIn, out, price);
     }
 
     function _authorized(address caller) private view returns (bool) {
