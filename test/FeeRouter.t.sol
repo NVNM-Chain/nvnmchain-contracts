@@ -349,9 +349,15 @@ contract FeeRouterTest is Test {
     }
 
     function test_factory_swapperNeedsAGasBudget() public {
-        vm.prank(owner);
-        vm.expectRevert(FeeRouterFactory.ZeroGas.selector);
+        vm.startPrank(owner);
+        vm.expectRevert(FeeRouterFactory.InvalidGas.selector);
         factory.setSwapper(makeAddr("swapper"), 0);
+        // And not one no block could grant, which would fail every flush until lowered.
+        uint256 most = factory.MAX_SWAP_GAS();
+        vm.expectRevert(FeeRouterFactory.InvalidGas.selector);
+        factory.setSwapper(makeAddr("swapper"), most + 1);
+        factory.setSwapper(makeAddr("swapper"), most);
+        vm.stopPrank();
     }
 
     function test_flush_retriesTheHeldBuybackWithinTheSwapperCap() public {

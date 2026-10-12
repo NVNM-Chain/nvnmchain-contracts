@@ -166,7 +166,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     /// @dev Tokens must be standard ERC-20s (no fee-on-transfer / rebasing).
     function initialize(address owner_, address stakeToken_, address rewardToken_) external initializer {
-        if (stakeToken_ == address(0) || rewardToken_ == address(0)) revert ZeroAddress();
+        // No owner would leave the proxy unupgradeable, with every knob at its default.
+        if (owner_ == address(0) || stakeToken_ == address(0) || rewardToken_ == address(0)) revert ZeroAddress();
         _initializeOwner(owner_);
         StakingStorage storage $ = _s();
         $.stakeToken = stakeToken_;
@@ -541,8 +542,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     ///         as it stands at the boundary block, so only the lockup after it makes a seat cost.
     function setCommitteeConfig(uint256 maxSeats_, uint256 acquiredWeight_, uint256 maxDelegated_) external onlyOwner {
         if (maxSeats_ == 0) revert ZeroAmount();
-        if (maxSeats_ > MAX_SEATS) revert TooManySeats();
         StakingStorage storage $ = _s();
+        // Fewer seats than the floor would elect nobody for good.
+        if (maxSeats_ > MAX_SEATS || maxSeats_ < $.minSeats) revert TooManySeats();
         if ($.unbondingPeriod == 0) revert UnbondingRequired();
         $.maxSeats = maxSeats_;
         $.acquiredWeight = acquiredWeight_;
@@ -561,7 +563,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     ///         addresses in its registry, under its own floor, so this bounds the return value,
     ///         not the committee. 0 disables it.
     function setMinSeats(uint256 minSeats_) external onlyOwner {
-        _s().minSeats = minSeats_;
+        StakingStorage storage $ = _s();
+        if (minSeats_ > ($.maxSeats == 0 ? MAX_SEATS : $.maxSeats)) revert TooManySeats();
+        $.minSeats = minSeats_;
         emit MinSeatsSet(minSeats_);
     }
 

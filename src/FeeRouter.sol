@@ -252,9 +252,13 @@ contract FeeRouterFactory is Ownable {
     event MaxCommissionSet(uint256 bps);
     event SwapperSet(address swapper, uint256 swapGas);
 
+    /// @dev More than a swap could use, and less than a block: above it every flush would fail
+    ///      `SwapUnderfunded` until the owner lowered it.
+    uint256 public constant MAX_SWAP_GAS = 5_000_000;
+
     error CommissionTooHigh();
     error ZeroAddress();
-    error ZeroGas();
+    error InvalidGas();
 
     constructor(address staking_, address lockbox_, address owner_, uint256 maxCommissionBps_, address devshare_) {
         if (staking_ == address(0) || lockbox_ == address(0) || devshare_ == address(0)) revert ZeroAddress();
@@ -277,7 +281,7 @@ contract FeeRouterFactory is Ownable {
     /// @dev Routers call it with `minOut = 0`, so all price protection lives in the swapper:
     ///      this must be a `GuardedSwapper` or equivalent, never a bare AMM.
     function setSwapper(address swapper_, uint256 swapGas_) external onlyOwner {
-        if (swapper_ != address(0) && swapGas_ == 0) revert ZeroGas();
+        if (swapper_ != address(0) && (swapGas_ == 0 || swapGas_ > MAX_SWAP_GAS)) revert InvalidGas();
         swapper = swapper_;
         swapGas = swapGas_;
         emit SwapperSet(swapper_, swapGas_);

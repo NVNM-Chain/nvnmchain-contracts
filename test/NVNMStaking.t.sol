@@ -501,6 +501,8 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         fresh.initialize(owner, address(0), address(usd));
         vm.expectRevert(NVNMStaking.ZeroAddress.selector);
         fresh.initialize(owner, address(nvnm), address(0));
+        vm.expectRevert(NVNMStaking.ZeroAddress.selector);
+        fresh.initialize(address(0), address(nvnm), address(usd));
     }
 
     function test_upgrade_preservesStakeAndRewards_onlyOwner() public {
@@ -733,6 +735,17 @@ contract NVNMStakingElectionTest is NVNMStakingTestBase {
         vals = _committee();
         assertEq(vals.length, 2, "at the floor the committee seats");
         assertEq(staking.minSeats(), 2);
+
+        // Neither bound may cross the other: that would elect nobody for good.
+        vm.startPrank(owner);
+        vm.expectRevert(NVNMStaking.TooManySeats.selector);
+        staking.setMinSeats(22);
+        vm.expectRevert(NVNMStaking.TooManySeats.selector);
+        staking.setCommitteeConfig(1, 1, 0);
+        staking.setCommitteeConfig(2, 1, 0);
+        vm.expectRevert(NVNMStaking.TooManySeats.selector);
+        staking.setMinSeats(3);
+        vm.stopPrank();
     }
 
     function test_election_absurdAcquiredWeightSaturatesInsteadOfReverting() public {
