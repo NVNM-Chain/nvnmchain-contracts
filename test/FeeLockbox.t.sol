@@ -237,8 +237,30 @@ contract FeeLockboxTest is Test {
         lockbox.applySplit(id);
         assertEq(lockbox.devshareBps(), 2000);
         assertEq(lockbox.buybackBps(), 3000);
-        vm.expectRevert(FeeLockbox.AlreadyApplied.selector);
+        vm.expectRevert(FeeLockbox.SplitStale.selector);
         lockbox.applySplit(id);
+    }
+
+    function test_split_applyingOneVoidsTheOthers() public {
+        _set(5, 4);
+        uint256 first = _propose(0, 2000, 3000);
+        uint256 second = _propose(0, 1000, 4000);
+        _back(first, 1, 3);
+        _back(second, 1, 3);
+        vm.warp(block.timestamp + 1 days);
+        lockbox.applySplit(second);
+
+        // Still backed by a settled majority, but as a change from the split just replaced.
+        vm.expectRevert(FeeLockbox.SplitStale.selector);
+        lockbox.applySplit(first);
+        assertEq(lockbox.devshareBps(), 1000);
+
+        // Proposed again, it is voted on against the split in force.
+        uint256 again = _propose(0, 500, 4500);
+        _back(again, 1, 3);
+        vm.warp(block.timestamp + 1 days);
+        lockbox.applySplit(again);
+        assertEq(lockbox.devshareBps(), 500);
     }
 
     function test_split_needsAMajorityOfTheActiveSet() public {

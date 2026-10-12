@@ -28,7 +28,6 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
     struct Split {
         uint16 devBps;
         uint16 buyBps;
-        bool applied;
     }
 
     uint256 public immutable splitDelay; // how long a backing majority is public before it applies
@@ -38,7 +37,7 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
     mapping(uint256 => mapping(bytes32 => uint64)) public backedSince; // proposal => seat => time, 0 = not
 
     bool public commenced;
-    uint256 public splitsBeforeCommencement; // proposals below this id were voted under the old rules
+    uint256 public firstLiveSplit; // proposals below this id are void: voted before what holds now
     mapping(bytes32 => bool) public declared; // seat => its affiliation is on record
     mapping(bytes32 => bool) public affiliated; // seat => affiliated with the founding parties
     mapping(bytes32 => bool) public voted; // seat => votes to commence
@@ -66,7 +65,6 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
     error NoSuchSplit();
     error SplitStale();
     error SplitPending();
-    error AlreadyApplied();
     error DevshareRaised();
     error ValidatorShareCut();
     error ZeroDelay();
@@ -125,7 +123,7 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
         if ((active - affiliatedCount) * 2 <= active) revert MajorityAffiliated();
         if (votes * 2 <= active) revert VoteShort();
         commenced = true;
-        splitsBeforeCommencement = splits.length;
+        firstLiveSplit = splits.length;
         emit Commenced(active, affiliatedCount, votes);
     }
 
@@ -158,7 +156,7 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
         _checkSplit(devBps, buyBps);
         id = splits.length;
         // Narrowed after `_checkSplit`: both ratios fit.
-        splits.push(Split({devBps: uint16(devBps), buyBps: uint16(buyBps), applied: false}));
+        splits.push(Split({devBps: uint16(devBps), buyBps: uint16(buyBps)}));
         backedSince[id][s] = uint64(block.timestamp);
         emit SplitProposed(id, msg.sender, devBps, buyBps);
     }
@@ -177,11 +175,11 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
     /// @dev Devshare does not wait on commencement, so until then a proposal may not raise it, nor
     ///      cut the validator share: either pays the founding parties while they hold the set.
     ///      Commencement voids earlier proposals, or one refused then could pass on its old votes.
+    ///      So does applying one: the rest were backed as changes from the split it replaced.
     function applySplit(uint256 id) external {
         if (id >= splits.length) revert NoSuchSplit();
-        if (id < splitsBeforeCommencement) revert SplitStale();
+        if (id < firstLiveSplit) revert SplitStale();
         Split memory s = splits[id];
-        if (s.applied) revert AlreadyApplied();
         (uint256 active, uint256 backers, uint256 settled) = splitTally(id);
         if (backers * 2 <= active) revert VoteShort();
         if (settled * 2 <= active) revert SplitPending();
@@ -190,7 +188,7 @@ contract FeeLockbox is Ownable, ReentrancyGuard {
             if (devBps > devshareBps) revert DevshareRaised();
             if (devBps + buyBps > uint256(devshareBps) + buybackBps) revert ValidatorShareCut();
         }
-        splits[id].applied = true;
+        firstLiveSplit = splits.length;
         devshareBps = uint128(devBps);
         buybackBps = uint128(buyBps);
         emit SplitApplied(id, devBps, buyBps);
