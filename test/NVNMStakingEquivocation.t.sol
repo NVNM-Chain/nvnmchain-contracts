@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
+import {VALIDATOR_REGISTRY} from "../src/Constants.sol";
 import {NVNMStaking} from "../src/NVNMStaking.sol";
 import {IEquivocation} from "../src/interfaces/IEquivocation.sol";
 import {NVNMStakingTestBase} from "./NVNMStaking.t.sol";
@@ -9,7 +10,6 @@ import {Ownable} from "solady/auth/Ownable.sol";
 /// @dev Slashing on evidence of conflicting votes. The node's registry, a precompile, is mocked:
 ///      what it accepts as evidence is the node's to test.
 contract NVNMStakingEquivocationTest is NVNMStakingTestBase {
-    address constant REGISTRY = 0xCcCCCCcC00000000000000000000000000000001;
     bytes32 constant KEY = keccak256("a consensus key");
     /// @dev Evidence opens with the key that signed. The rest stands in for its two votes.
     bytes EVIDENCE = bytes.concat(KEY, hex"e71de9ce");
@@ -26,7 +26,9 @@ contract NVNMStakingEquivocationTest is NVNMStakingTestBase {
     /// @dev The registry reads `evidence` as `who` signing twice in `epoch`'s view 3, `age` ago.
     function _registryReads(bytes memory evidence, address who, uint64 epoch, uint64 age) internal {
         vm.mockCall(
-            REGISTRY, abi.encodeCall(IEquivocation.equivocator, (evidence)), abi.encode(who, epoch, uint64(3), age)
+            VALIDATOR_REGISTRY,
+            abi.encodeCall(IEquivocation.equivocator, (evidence)),
+            abi.encode(who, epoch, uint64(3), age)
         );
     }
 
@@ -46,18 +48,20 @@ contract NVNMStakingEquivocationTest is NVNMStakingTestBase {
         assertEq(gateway.feePayer(), bob, "whoever brings it pays the bridge");
     }
 
-    function test_a_round_is_paid_for_once() public {
+    function test_an_epoch_is_paid_for_once() public {
         _open();
         _registryReads(EVIDENCE, validator, 7, 0);
         staking.slashEquivocation(EVIDENCE);
 
-        // Other evidence of the same round, as two more votes the key signed in it would be.
+        // Evidence of another round of the epoch: a key that signs twice does so in many.
         bytes memory again = bytes.concat(KEY, hex"a9a1");
-        _registryReads(again, validator, 7, 1);
+        bytes memory nextRound = abi.encode(validator, uint64(7), uint64(4), uint64(1));
+        vm.mockCall(VALIDATOR_REGISTRY, abi.encodeCall(IEquivocation.equivocator, (again)), nextRound);
         vm.expectRevert(NVNMStaking.AlreadySlashed.selector);
         staking.slashEquivocation(again);
+        assertEq(staking.bondOf(validator), 90 ether);
 
-        // Another round is another offence, and another key's the same round is its own.
+        // Another epoch is another offence, and another key's the same epoch is its own.
         bytes memory later = bytes.concat(KEY, hex"1a7e");
         _registryReads(later, validator, 8, 0);
         assertEq(staking.slashEquivocation(later), 9 ether);
@@ -67,7 +71,7 @@ contract NVNMStakingEquivocationTest is NVNMStakingTestBase {
         assertEq(staking.slashEquivocation(other), 10 ether);
     }
 
-    function test_a_round_is_paid_for_by_its_key_whatever_address_holds_it() public {
+    function test_an_epoch_is_paid_for_by_its_key_whatever_address_holds_it() public {
         _open();
         _registryReads(EVIDENCE, validator, 7, 0);
         staking.slashEquivocation(EVIDENCE);
@@ -80,7 +84,7 @@ contract NVNMStakingEquivocationTest is NVNMStakingTestBase {
         assertEq(staking.bondOf(validator2), 100 ether);
     }
 
-    function test_a_round_stays_open_until_there_is_a_bond_to_slash() public {
+    function test_an_epoch_stays_open_until_there_is_a_bond_to_slash() public {
         _open();
         // In the registry and electable, but with no bond yet.
         _registryReads(EVIDENCE, validator2, 7, 0);
@@ -104,7 +108,7 @@ contract NVNMStakingEquivocationTest is NVNMStakingTestBase {
     function test_what_the_registry_rejects_slashes_nobody() public {
         _open();
         bytes memory rejected = abi.encodeWithSignature("InvalidSignature()");
-        vm.mockCallRevert(REGISTRY, abi.encodeCall(IEquivocation.equivocator, (EVIDENCE)), rejected);
+        vm.mockCallRevert(VALIDATOR_REGISTRY, abi.encodeCall(IEquivocation.equivocator, (EVIDENCE)), rejected);
         vm.expectRevert(rejected);
         staking.slashEquivocation(EVIDENCE);
         assertEq(staking.bondOf(validator), 100 ether);
@@ -114,7 +118,7 @@ contract NVNMStakingEquivocationTest is NVNMStakingTestBase {
         _openRegistration(100 ether);
         _bond(validator, 100 ether);
         // Closed, the registry is not even asked: its answer here would be the revert.
-        vm.mockCallRevert(REGISTRY, abi.encodeCall(IEquivocation.equivocator, (EVIDENCE)), "asked");
+        vm.mockCallRevert(VALIDATOR_REGISTRY, abi.encodeCall(IEquivocation.equivocator, (EVIDENCE)), "asked");
 
         // Unset, nothing is at stake.
         vm.expectRevert(NVNMStaking.SlashingClosed.selector);
@@ -126,7 +130,7 @@ contract NVNMStakingEquivocationTest is NVNMStakingTestBase {
         vm.expectRevert(NVNMStaking.SlashingClosed.selector);
         staking.slashEquivocation(EVIDENCE);
 
-        // The round is still unpaid when the election opens it.
+        // The epoch is still unpaid when the election opens it.
         _startElection();
         vm.clearMockedCalls();
         _registryReads(EVIDENCE, validator, 7, 0);
@@ -147,6 +151,12 @@ contract NVNMStakingEquivocationTest is NVNMStakingTestBase {
         staking.setEquivocation(10_000, 5);
         assertEq(staking.equivocationBps(), 10_000);
         assertEq(staking.evidenceEpochs(), 5);
+
+        // The event says what was stored.
+        vm.expectEmit();
+        emit NVNMStaking.EquivocationSet(10_000, type(uint64).max);
+        staking.setEquivocation(10_000, type(uint256).max);
+        assertEq(staking.evidenceEpochs(), type(uint64).max);
         vm.stopPrank();
     }
 }

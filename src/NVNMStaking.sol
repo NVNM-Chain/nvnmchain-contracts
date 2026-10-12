@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {BPS} from "./Constants.sol";
+import {BPS, VALIDATOR_REGISTRY} from "./Constants.sol";
 import {IBondGateway} from "./interfaces/IBondGateway.sol";
 import {IEquivocation} from "./interfaces/IEquivocation.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
@@ -38,8 +38,6 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     uint256 private constant MAX_SEATS = 21; // the validator set's cap
     uint256 private constant MAX_UNBONDING = 14 days; // the longest exit; the owner's timelock waits longer
     uint256 private constant MAX_REWARD_DURATION = 30 days;
-    // The node's validator registry, which checks evidence of conflicting votes.
-    address private constant VALIDATOR_REGISTRY = 0xCcCCCCcC00000000000000000000000000000001;
 
     /// @dev An exiting stake bucket, cleared as a unit so the pair cannot drift apart.
     struct Unbonding {
@@ -94,13 +92,13 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         // The L1 bridge gateway: bonds arrive only through it and leave or are seized through it,
         // so each stays tied to its validator's bond on Ethereum.
         address bondGateway;
-        // Evidence slashing: what a round of conflicting votes costs a bond, 0 = closed, and
-        // for how many epochs evidence of it counts. A key pays once for a round, whatever
-        // address the registry holds it under by then. Both share the gateway's slot, which
-        // a slash reads anyway.
+        // Evidence slashing: what conflicting votes cost a bond, 0 = closed, and for how many
+        // epochs evidence of them counts. A key pays once for an epoch, whatever address the
+        // registry holds it under by then: one fault signs twice in many rounds. Both share
+        // the gateway's slot, which a slash reads anyway.
         uint16 equivocationBps;
         uint64 evidenceEpochs;
-        mapping(bytes32 key => mapping(uint256 round => bool)) punished; // round: epoch << 64 | view
+        mapping(bytes32 key => mapping(uint64 epoch => bool)) punished;
     }
 
     // keccak256(abi.encode(uint256(keccak256("nvnm.staking.storage")) - 1)) & ~bytes32(uint256(0xff))
@@ -381,8 +379,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     /// @notice Slash `equivocationBps` of the bond of the validator whose consensus key signed
     ///         the conflicting votes in `evidence`, as the node's registry reads it. Anyone may
-    ///         bring it: once for a key and round, and while the round is no more than
-    ///         `evidenceEpochs` old. With no bond to slash it reverts, and the round stays open
+    ///         bring it: once for a key and epoch, and while the epoch is no more than
+    ///         `evidenceEpochs` old. With no bond to slash it reverts, and the epoch stays open
     ///         for one that arrives in time. You pay the bridge's fee (see {IBondGateway}) and
     ///         are not paid back: what is seized burns, so bringing evidence is the validators'
     ///         and the foundation's own interest, not a bounty.
@@ -395,10 +393,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
             IEquivocation(VALIDATOR_REGISTRY).equivocator(evidence);
         if (epochsAgo > $.evidenceEpochs) revert EvidenceExpired();
         // The registry accepted the evidence, so it opens with the key that signed.
-        mapping(uint256 => bool) storage punished = $.punished[bytes32(evidence[:32])];
-        uint256 round = uint256(epoch) << 64 | viewNumber;
-        if (punished[round]) revert AlreadySlashed();
-        punished[round] = true;
+        mapping(uint64 => bool) storage punished = $.punished[bytes32(evidence[:32])];
+        if (punished[epoch]) revert AlreadySlashed();
+        punished[epoch] = true;
         emit Equivocated(validator, epoch, viewNumber);
         seized = _slash($, validator, bps);
         if (seized == 0) revert NothingToSlash();
@@ -581,8 +578,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         StakingStorage storage $ = _s();
         $.equivocationBps = uint16(bps);
         // No round is older than uint64 epochs, so the cap changes nothing.
-        $.evidenceEpochs = uint64(FixedPointMathLib.min(evidenceEpochs_, type(uint64).max));
-        emit EquivocationSet(bps, evidenceEpochs_);
+        uint64 epochs = uint64(evidenceEpochs_.min(type(uint64).max));
+        $.evidenceEpochs = epochs;
+        emit EquivocationSet(bps, epochs);
     }
 
     /// @notice The L1 bridge gateway that bonds arrive through and leave by.

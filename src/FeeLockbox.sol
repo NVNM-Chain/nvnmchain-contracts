@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.23;
 
-import {BPS} from "./Constants.sol";
+import {BPS, VALIDATOR_REGISTRY} from "./Constants.sol";
 import {IValidatorConfigV2} from "./interfaces/IValidatorConfigV2.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
@@ -20,7 +20,7 @@ import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 ///      held by an address: a newcomer given a departed validator's address, or a seat handed to
 ///      a new address, starts with none. Commencement is permanent.
 contract FeeLockbox is Ownable, ReentrancyGuard {
-    IValidatorConfigV2 public constant REGISTRY = IValidatorConfigV2(0xCcCCCCcC00000000000000000000000000000001);
+    IValidatorConfigV2 public constant REGISTRY = IValidatorConfigV2(VALIDATOR_REGISTRY);
     /// @notice The least share of gross fees the buyback cut may take.
     uint256 public constant MIN_BUYBACK_BPS = 2_000;
 

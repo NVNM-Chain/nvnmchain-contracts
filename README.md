@@ -30,14 +30,10 @@ deposited, never minted, and vest over `rewardDuration` (a day by default).
   top-N (at most 21) by `acquired * acquiredWeight + delegated`, one equal seat each.
   `candidacyBond` is the 1M NVNM acquired stake, which `minAcquired` enforces at election
   time; below `minSeats` the election returns nobody, and the node then applies its own
-  floor, `min(4, registry)`. Its timelock should outlast the 14-day unbonding cap, so
-  delegators can leave before an upgrade lands. Slashing takes only the bond, once the
-  election is configured, and is the `slasher`'s: a Safe without that delay, or a resigning
-  validator would withdraw its bond first. `slashEquivocation` is anyone's instead, on
-  evidence the node's registry accepts that a validator's key signed conflicting votes,
-  once `setEquivocation` opens it; whoever brings it pays the bridge's fee and earns nothing,
-  since the seized bond burns. The lockbox on Ethereum has a slasher of its own, for the slash
-  this chain's validators would leave out, and `slashFromBridge` drops here what it seized.
+  floor, `min(4, registry)`. Slashing takes only the bond, once the election is configured:
+  the `slasher` at will, anyone with the registry's evidence of conflicting votes
+  (`slashEquivocation`, unpaid: the seized bond burns), and the lockbox's own slasher on
+  Ethereum, which `slashFromBridge` follows here.
 - **GuardedSwapper** — buyback-market wrapper: a per-swap size cap and a two-sided price
   floor, so a sandwiched pool makes the swap revert instead of donating the buyback. Only
   the factory's routers may swap, not the owner.
