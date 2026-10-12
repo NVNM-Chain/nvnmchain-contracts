@@ -8,6 +8,7 @@ import {Ownable} from "solady/auth/Ownable.sol";
 import {FixedPointMathLib} from "solady/utils/FixedPointMathLib.sol";
 import {Initializable} from "solady/utils/Initializable.sol";
 import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
+import {SafeCastLib} from "solady/utils/SafeCastLib.sol";
 import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 
@@ -27,6 +28,7 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 ///      unbonding period.
 contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard {
     using FixedPointMathLib for uint256;
+    using SafeCastLib for uint256;
 
     // Reward-accumulator scale, sized to dominate a ~1e30 share supply: at 1e18 a 500-USDC
     // deposit against a 1M-NVNM pool rounds to zero and strands in the contract.
@@ -45,6 +47,21 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         uint256 releaseAt;
     }
 
+    /// @dev A user's stake in a pool. Shares and claimable rewards share a slot: ~1e33 shares
+    ///      and ~1e38 reward units fit, and every write of one is a write of the other.
+    struct Position {
+        uint128 shares;
+        uint128 accrued; // claimable reward token
+        uint256 paid; // the accumulator at the last settle (ACC-scaled)
+    }
+
+    /// @dev A pool's reward stream: a deposit vests at `rate` until `finish`, from `updated` on.
+    struct Stream {
+        uint256 rate; // ACC-scaled tokens per second
+        uint64 finish; // when the stream runs dry
+        uint64 updated; // last accrual
+    }
+
     // -- ERC-7201 namespaced storage -----------------------------------------
     /// @custom:storage-location erc7201:nvnm.staking.storage
     struct StakingStorage {
@@ -52,10 +69,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         address rewardToken; // fee stablecoin (USDT0 on mainnet)
         mapping(address => uint256) totalStaked; // validator => pool tokens
         mapping(address => uint256) accRewardPerShare; // validator => reward accumulator (ACC-scaled)
-        mapping(address => mapping(address => uint256)) shares; // validator => user => pool shares
+        mapping(address => mapping(address => Position)) positions; // validator => user
         mapping(address => uint256) totalShares; // validator => total pool shares
-        mapping(address => mapping(address => uint256)) userPaid; // validator => user => acc at last settle
-        mapping(address => mapping(address => uint256)) accrued; // validator => user => claimable rewards
         // unbonding: exiting stake stops earning and stops counting for election at once, and
         // is withdrawable after the delay
         uint256 unbondingPeriod; // seconds; 0 = immediate
@@ -82,9 +97,7 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         // while it vests, not by landing in the block before the flush. A pool with no shares
         // pauses its stream until the next stake.
         uint256 rewardDuration; // seconds, for deposits from now on
-        mapping(address => uint256) rewardRate; // validator => ACC-scaled tokens per second
-        mapping(address => uint256) rewardFinish; // validator => when the stream runs dry
-        mapping(address => uint256) rewardUpdated; // validator => last accrual
+        mapping(address => Stream) streams; // validator => its stream
         // The L1 bridge gateway: bonds arrive only through it and leave or are seized through it,
         // so each stays tied to its validator's bond on Ethereum.
         address bondGateway;
@@ -178,8 +191,9 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         if (tShares != 0 && tStaked == 0) revert PoolCollapsed();
         uint256 minted = _toShares(tShares, tStaked, amount);
         if (minted == 0) revert ZeroShares(); // backstop: rate pushed beyond the virtual offset
-        _settle($, validator, msg.sender);
-        $.shares[validator][msg.sender] += minted;
+        Position storage p = $.positions[validator][msg.sender];
+        _settle($, validator, p);
+        p.shares = (p.shares + minted).toUint128();
         $.totalShares[validator] = tShares + minted;
         $.totalStaked[validator] = tStaked + amount;
         SafeTransferLib.safeTransferFrom($.stakeToken, msg.sender, address(this), amount);
@@ -193,15 +207,16 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         StakingStorage storage $ = _s();
         uint256 tShares = $.totalShares[validator];
         uint256 tStaked = $.totalStaked[validator];
-        uint256 userShares = $.shares[validator][msg.sender];
+        Position storage p = $.positions[validator][msg.sender];
+        uint256 userShares = p.shares;
         if (tStaked == 0 || _toTokens(tShares, tStaked, userShares) < amount) {
             revert InsufficientStake();
         }
         // Burn rounded-up shares so the pool never pays out more than the share fraction.
         uint256 burned = _toSharesUp(tShares, tStaked, amount);
         if (burned > userShares) burned = userShares;
-        _settle($, validator, msg.sender);
-        $.shares[validator][msg.sender] = userShares - burned;
+        _settle($, validator, p);
+        p.shares = uint128(userShares - burned);
         $.totalShares[validator] = tShares - burned;
         $.totalStaked[validator] = tStaked - amount;
         uint256 period = $.unbondingPeriod;
@@ -250,10 +265,12 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         SafeTransferLib.safeTransferFrom($.rewardToken, msg.sender, address(this), amount);
         _accrue($, validator);
         uint256 duration = $.rewardDuration;
-        uint256 finish = $.rewardFinish[validator];
-        uint256 unvested = block.timestamp < finish ? $.rewardRate[validator] * (finish - block.timestamp) : 0;
-        $.rewardRate[validator] = (amount * ACC + unvested) / duration;
-        $.rewardFinish[validator] = block.timestamp + duration;
+        Stream storage s = $.streams[validator];
+        uint256 finish = s.finish;
+        uint256 unvested = block.timestamp < finish ? s.rate * (finish - block.timestamp) : 0;
+        s.rate = (amount * ACC + unvested) / duration;
+        s.finish = (block.timestamp + duration).toUint64();
+        s.updated = uint64(block.timestamp);
         emit RewardDeposited(validator, msg.sender, amount);
     }
 
@@ -283,45 +300,50 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     /// @notice Claim your accrued reward-token rewards for `validator`.
     function claim(address validator) external nonReentrant returns (uint256 amount) {
         StakingStorage storage $ = _s();
-        _settle($, validator, msg.sender);
-        amount = $.accrued[validator][msg.sender];
+        Position storage p = $.positions[validator][msg.sender];
+        _settle($, validator, p);
+        amount = p.accrued;
         if (amount != 0) {
-            $.accrued[validator][msg.sender] = 0;
+            p.accrued = 0;
             SafeTransferLib.safeTransfer($.rewardToken, msg.sender, amount);
             emit RewardClaimed(validator, msg.sender, amount);
         }
     }
 
-    /// @dev Fold pending rewards into `accrued` and mark the user settled to the accumulator.
+    /// @dev Fold pending rewards into `accrued` and mark the position settled to the accumulator.
     ///      Callers change shares only after this, so the stream accrues on the old supply.
-    function _settle(StakingStorage storage $, address validator, address user) private {
-        _accrue($, validator);
-        $.accrued[validator][user] += _pendingReward($, validator, user);
-        $.userPaid[validator][user] = $.accRewardPerShare[validator];
+    function _settle(StakingStorage storage $, address validator, Position storage p) private {
+        uint256 acc = _accrue($, validator);
+        p.accrued = (p.accrued + _pending(p, acc)).toUint128();
+        p.paid = acc;
     }
 
-    /// @dev Vest the stream into the accumulator up to now. With no shares to pay, the unvested
-    ///      remainder restarts from now instead of vesting to nobody.
-    function _accrue(StakingStorage storage $, address validator) private {
-        uint256 last = $.rewardUpdated[validator];
-        uint256 finish = $.rewardFinish[validator];
-        if (last < finish && $.totalShares[validator] == 0) {
-            $.rewardFinish[validator] = block.timestamp + (finish - last);
+    /// @dev Vest the stream into the accumulator up to now, and return it. With no shares to
+    ///      pay, the unvested remainder restarts from now instead of vesting to nobody. A stream
+    ///      that has run dry writes nothing: `depositReward` restamps it.
+    function _accrue(StakingStorage storage $, address validator) private returns (uint256 acc) {
+        Stream storage s = $.streams[validator];
+        (uint256 last, uint256 finish) = (s.updated, s.finish);
+        if (last >= finish) return $.accRewardPerShare[validator];
+        if ($.totalShares[validator] == 0) {
+            acc = $.accRewardPerShare[validator];
+            s.finish = uint64(block.timestamp + (finish - last));
         } else {
-            $.accRewardPerShare[validator] = _vestedAcc($, validator);
+            acc = _vestedAcc($, validator);
+            $.accRewardPerShare[validator] = acc;
         }
-        $.rewardUpdated[validator] = block.timestamp;
+        s.updated = uint64(block.timestamp);
     }
 
     /// @dev The accumulator as `_accrue` would leave it now.
     function _vestedAcc(StakingStorage storage $, address validator) private view returns (uint256 acc) {
         acc = $.accRewardPerShare[validator];
-        uint256 last = $.rewardUpdated[validator];
-        uint256 finish = $.rewardFinish[validator];
+        Stream storage s = $.streams[validator];
+        (uint256 last, uint256 finish) = (s.updated, s.finish);
         uint256 tShares = $.totalShares[validator];
         if (last < finish && tShares != 0) {
             uint256 end = block.timestamp < finish ? block.timestamp : finish;
-            acc += $.rewardRate[validator].fullMulDiv(end - last, tShares);
+            acc += s.rate.fullMulDiv(end - last, tShares);
         }
     }
 
@@ -332,9 +354,10 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         if (cap != 0 && staked > cap) revert DelegationCap();
     }
 
-    /// @dev The one accrual formula: `earned` must report what `claim` will pay.
-    function _pendingReward(StakingStorage storage $, address validator, address user) private view returns (uint256) {
-        return $.shares[validator][user].fullMulDiv(_vestedAcc($, validator) - $.userPaid[validator][user], ACC);
+    /// @dev The one accrual formula, against the accumulator `acc`: `earned` must report what
+    ///      `claim` will pay.
+    function _pending(Position storage p, uint256 acc) private view returns (uint256) {
+        return uint256(p.shares).fullMulDiv(acc - p.paid, ACC);
     }
 
     // -- share/token conversion ----------------------------------------------
@@ -626,7 +649,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
     /// @notice Claimable rewards for `user` on `validator`, including unsettled accrual.
     function earned(address validator, address user) external view returns (uint256) {
         StakingStorage storage $ = _s();
-        return $.accrued[validator][user] + _pendingReward($, validator, user);
+        Position storage p = $.positions[validator][user];
+        return p.accrued + _pending(p, _vestedAcc($, validator));
     }
 
     /// @notice `user`'s live stake in tokens at the pool's current rate.
@@ -634,11 +658,11 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         StakingStorage storage $ = _s();
         uint256 tShares = $.totalShares[validator];
         if (tShares == 0) return 0;
-        return _toTokens(tShares, $.totalStaked[validator], $.shares[validator][user]);
+        return _toTokens(tShares, $.totalStaked[validator], $.positions[validator][user].shares);
     }
 
     function sharesOf(address validator, address user) external view returns (uint256) {
-        return _s().shares[validator][user];
+        return _s().positions[validator][user].shares;
     }
 
     function totalStaked(address validator) external view returns (uint256) {
@@ -711,8 +735,8 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
 
     /// @notice `validator`'s reward stream: ACC-scaled (1e36) tokens per second, until `finish`.
     function rewardStream(address validator) external view returns (uint256 rate, uint256 finish) {
-        StakingStorage storage $ = _s();
-        return ($.rewardRate[validator], $.rewardFinish[validator]);
+        Stream storage s = _s().streams[validator];
+        return (s.rate, s.finish);
     }
 
     function stakeToken() external view returns (address) {

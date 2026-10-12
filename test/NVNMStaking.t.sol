@@ -1054,6 +1054,25 @@ contract NVNMStakingStreamTest is NVNMStakingTestBase {
         assertApproxEqAbs(staking.earned(validator, bob), 50 ether, 1);
     }
 
+    function test_rewards_aDepositAfterADryStreamStartsAtTheDeposit() public {
+        // Settles after the stream ran dry leave its clock alone; the next deposit must restamp
+        // it, or the new stream vests from where the old one stopped.
+        _stake(alice, validator, 100 ether);
+        staking.depositReward(validator, 100 ether);
+        _vest();
+        vm.prank(alice);
+        staking.claim(validator);
+        vm.warp(vm.getBlockTimestamp() + 1 days);
+        vm.prank(alice);
+        staking.claim(validator); // nothing streaming: nothing written
+        vm.warp(vm.getBlockTimestamp() + 1 days);
+
+        staking.depositReward(validator, 100 ether);
+        assertEq(staking.earned(validator, alice), 0, "nothing of the new stream yet");
+        vm.warp(vm.getBlockTimestamp() + staking.rewardDuration() / 2);
+        assertApproxEqAbs(staking.earned(validator, alice), 50 ether, 1);
+    }
+
     function test_setRewardDuration_isBounded() public {
         vm.startPrank(owner);
         vm.expectRevert(NVNMStaking.InvalidPeriod.selector);
