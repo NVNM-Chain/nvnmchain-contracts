@@ -40,6 +40,15 @@ contract OverstatingMarket {
     }
 }
 
+/// @dev A market that takes half of what it is offered, and pays for all of it.
+contract HalfTakingMarket {
+    function swap(address tokenIn, address tokenOut, uint256 amountIn, uint256) external returns (uint256) {
+        SafeTransferLib.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn / 2);
+        SafeTransferLib.safeTransfer(tokenOut, msg.sender, amountIn);
+        return amountIn;
+    }
+}
+
 contract GuardedSwapperTest is Test {
     GuardedSwapper guard;
     MockSwapPool pool;
@@ -275,5 +284,16 @@ contract GuardedSwapperTest is Test {
         vm.expectRevert(GuardedSwapper.PriceBelowFloor.selector);
         _swap(10 ether);
         assertEq(nvnm.balanceOf(address(guard)), 100 ether);
+    }
+
+    function test_swap_rejectsAMarketThatLeavesInputBehind() public {
+        HalfTakingMarket market = new HalfTakingMarket();
+        nvnm.mint(address(market), 100 ether);
+        vm.prank(owner);
+        guard.setGuards(address(market), 50 ether, 500, 2000);
+
+        // The price clears the floor, but half the input would stay in the swapper.
+        vm.expectRevert(GuardedSwapper.PartialFill.selector);
+        _swap(10 ether);
     }
 }

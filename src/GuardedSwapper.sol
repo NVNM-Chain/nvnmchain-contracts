@@ -50,6 +50,7 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
     error ZeroAmount();
     error AmountTooLarge();
     error PriceBelowFloor();
+    error PartialFill();
     error NotAuthorized();
 
     constructor(address owner_, address tokenIn_, address tokenOut_) {
@@ -106,10 +107,13 @@ contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
         if (amountIn == 0) revert ZeroAmount();
         if (amountIn > maxAmountIn) revert AmountTooLarge();
 
+        uint256 idle = SafeTransferLib.balanceOf(tokenIn, address(this));
         SafeTransferLib.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
         SafeTransferLib.safeApproveWithRetry(tokenIn, market, amountIn);
         uint256 held = SafeTransferLib.balanceOf(tokenOut, address(this));
         ISwapper(market).swap(tokenIn, tokenOut, amountIn, minOut);
+        // What a market leaves, or sends back, would stay here: nothing sends it on.
+        if (SafeTransferLib.balanceOf(tokenIn, address(this)) > idle) revert PartialFill();
         // What arrived, not what the market reports: an overstated `out` would clear the floor
         // and be paid from whatever tokenOut this contract already holds.
         out = SafeTransferLib.balanceOf(tokenOut, address(this)) - held;
