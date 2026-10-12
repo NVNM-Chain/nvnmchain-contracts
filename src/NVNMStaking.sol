@@ -420,16 +420,19 @@ contract NVNMStaking is UUPSUpgradeable, Initializable, Ownable, ReentrancyGuard
         }
     }
 
-    /// @notice `amount` more of `validator`'s bond, which the gateway has just minted here from
-    ///         `validator`'s bond on Ethereum. Stands `validator` for election once the bond
-    ///         reaches `candidacyBond`, if nothing else stops it. Joining an unbonding bond, it
-    ///         restarts the wait: otherwise it leaves with a matured one in the block it arrives.
-    /// @dev Never reverts for the bond's sake: it is already locked on Ethereum, and a delivery
-    ///      that reverted would leave it there with no record here. The gateway must deliver a
-    ///      bond only from its own validator, or anyone restarts another's wait.
+    /// @notice `amount` more of `validator`'s bond, pulled from the gateway, which has just
+    ///         minted it from `validator`'s bond on Ethereum and approved it. Stands `validator`
+    ///         for election once the bond reaches `candidacyBond`, if nothing else stops it.
+    ///         Joining an unbonding bond, it restarts the wait: otherwise it leaves with a matured
+    ///         one in the block it arrives.
+    /// @dev Books only what arrives: a gateway that minted nothing books no bond. Beyond that it
+    ///      never reverts for the bond's sake, which is already locked on Ethereum, and a delivery
+    ///      that reverted would leave there with no record here. The gateway must deliver a bond
+    ///      only from its own validator, or anyone restarts another's wait.
     function bondFromBridge(address validator, uint256 amount) external {
         StakingStorage storage $ = _s();
         if (msg.sender != $.bondGateway) revert NotBondGateway();
+        SafeTransferLib.safeTransferFrom($.stakeToken, msg.sender, address(this), amount);
         uint256 bond = $.bondPaid[validator] + amount;
         $.bondPaid[validator] = bond;
         $.bonded += amount;
