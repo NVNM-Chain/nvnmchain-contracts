@@ -455,6 +455,12 @@ contract NVNMStakingTest is NVNMStakingTestBase {
         fresh.initialize(address(0), address(nvnm), address(usd));
     }
 
+    function test_storage_sitsAtTheNamespacedSlot() public view {
+        // ERC-7201, and `stakeToken` is the struct's first field.
+        bytes32 slot = keccak256(abi.encode(uint256(keccak256("nvnm.staking.storage")) - 1)) & ~bytes32(uint256(0xff));
+        assertEq(address(uint160(uint256(vm.load(address(staking), slot)))), address(nvnm));
+    }
+
     function test_upgrade_preservesStakeAndRewards_onlyOwner() public {
         _stake(alice, validator, 100 ether);
         staking.depositReward(validator, 100 ether);
