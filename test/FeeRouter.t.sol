@@ -10,6 +10,7 @@ import {MockValidatorConfig} from "./support/MockValidatorConfig.sol";
 import {Test} from "forge-std/Test.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
 
 /// @dev A swapper that always rejects — stands in for `GuardedSwapper` hitting its price floor.
 contract RevertingSwapper {
@@ -35,6 +36,26 @@ contract BudgetRecordingSwapper {
     function swap(address, address, uint256, uint256) external returns (uint256) {
         received = gasleft();
         return 0;
+    }
+}
+
+/// @dev Reports a fill it never delivers.
+contract LyingSwapper {
+    function swap(address tokenIn, address, uint256 amountIn, uint256) external returns (uint256) {
+        MockERC20(tokenIn).transferFrom(msg.sender, address(this), amountIn);
+        return amountIn;
+    }
+}
+
+/// @dev A fee token whose every transfer calls the paying router back into `flush`.
+contract CallbackToken is MockERC20("callback", "CB") {
+    bool public gotBackIn;
+
+    function transfer(address to, uint256 amount) public override returns (bool) {
+        try FeeRouter(msg.sender).flush(address(this)) {
+            gotBackIn = true;
+        } catch {}
+        return super.transfer(to, amount);
     }
 }
 
@@ -300,6 +321,35 @@ contract FeeRouterTest is Test {
         assertEq(usd.allowance(address(r), factory.swapper()), 0, "approval cleared");
         vm.prank(owner);
         assertEq(r.sweep(address(usd), owner), 0, "sweep cannot reach it");
+    }
+
+    function test_flush_stopsOnASwapperThatReportsWhatItDidNotDeliver() public {
+        // The router forwards what the swapper reports; one that lies would be paid out of
+        // whatever stake token the router happens to hold. There is none, so the flush stops.
+        address liar = address(new LyingSwapper());
+        vm.prank(owner);
+        factory.setSwapper(liar, SWAP_GAS);
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
+        usd.mint(address(r), 100 ether);
+
+        vm.expectRevert(SafeTransferLib.TransferFailed.selector);
+        r.flush();
+    }
+
+    function test_flush_isNotReenteredByTheTokenItPays() public {
+        // A fee token is whatever FeeManager pays, so each transfer out is a call into code the
+        // router does not choose: one that flushes again mid-transfer must not cut the balance twice.
+        CallbackToken cb = new CallbackToken();
+        FeeRouter r = FeeRouter(_create(validator, operator, 10_000));
+        cb.mint(address(r), 100 ether);
+
+        r.flush(address(cb));
+
+        assertFalse(cb.gotBackIn(), "the call back in was refused");
+        assertEq(cb.balanceOf(treasury), 25 ether, "devshare once");
+        assertEq(lockbox.owed(address(cb), operator), 50 ether, "operator share once");
+        assertEq(r.heldForBuyback(address(cb)), 25 ether);
+        assertEq(cb.balanceOf(address(r)), 25 ether);
     }
 
     function test_flush_revertsWhenTheCallerCannotFundTheSwap() public {
