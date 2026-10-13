@@ -6,23 +6,12 @@ import {Anchoring} from "../../src/Anchoring.sol";
 import {IAnchoring} from "../../src/IAnchoring.sol";
 
 /// A fresh contract at a fixed block time, with the accounts and inputs the suites share.
-/// The shipped build names no module admin, so a chain that wants one installs a build like this.
-contract AnchoringWithAdmin is Anchoring {
-    address private immutable ADMIN;
-
-    constructor(address admin) {
-        ADMIN = admin;
-    }
-
-    function _admin() internal view override returns (address) {
-        return ADMIN;
-    }
-}
-
 abstract contract AnchoringFixture is Test {
     Anchoring internal anchoring;
 
-    address internal moduleAdmin = address(0xA0);
+    uint256 internal constant OWNER_SLOT = 11; // `owner` in `layout/anchoring.json`
+
+    address internal owner = address(0xA0);
     address internal alice = address(0xA11CE);
     address internal bob = address(0xB0B);
     address internal carol = address(0xCA401);
@@ -31,8 +20,9 @@ abstract contract AnchoringFixture is Test {
     string internal constant URI = "https://www.courtlistener.com/opinion/8857414/richmond-v-atwood/"; // > 32 bytes
 
     function setUp() public virtual {
-        anchoring = new AnchoringWithAdmin(moduleAdmin);
+        anchoring = new Anchoring();
         vm.warp(AT);
+        vm.store(address(anchoring), bytes32(OWNER_SLOT), bytes32(uint256(uint160(owner))));
     }
 
     /// Sender and origin both, as the EOA gate requires.

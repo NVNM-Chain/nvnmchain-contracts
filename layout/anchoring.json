@@ -83,6 +83,13 @@
       "offset": 0,
       "slot": "10",
       "type": "t_mapping(t_string_memory_ptr,t_array(t_uint64)dyn_storage)"
+    },
+    {
+      "contract": "src/Anchoring.sol:Anchoring",
+      "label": "owner",
+      "offset": 0,
+      "slot": "11",
+      "type": "t_address"
     }
   ],
   "types": {

@@ -34,6 +34,9 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     uint8 internal constant MATCH_EXACT = 1;
     uint8 internal constant MATCH_MAX = 4;
 
+    /// ERC-173's, which the precompile did not have.
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+
     /// Where the admin used to be stored. The migration still writes it and nothing reads it, so
     /// `_registryCount` keeps the offset the dump and the explorer expect.
     address private _formerAdmin;
@@ -56,12 +59,9 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// Names are not unique, hence a list.
     mapping(string => uint64[]) internal _registriesByName;
 
-    /// Who may grant a registry admin without holding the role, which this build gives to nobody.
-    /// A chain that wants a module admin returns one here and installs that build at a fork — the
-    /// only way to change it, since a boundary carries code and never storage.
-    function _admin() internal view virtual returns (address) {
-        return address(0);
-    }
+    /// The module's admin, who may grant a registry admin without holding the role. Genesis or a
+    /// fork names the first, in a slot past every one the migration writes.
+    address public owner;
 
     // ---- transactions ----
 
@@ -159,19 +159,19 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
 
     /// @inheritdoc IAnchoring
     /// @dev `msgServer.GrantRole`. A checksum scopes the role to that record; either way the
-    ///      registry's admin role administers it. The module admin skips the EOA gate, so it can
-    ///      be a contract.
+    ///      registry's admin role administers it. The owner skips the EOA gate, so it can be a
+    ///      contract.
     function grantRole(uint64 registryId, string calldata checksum, address account, string calldata role) external {
-        bool moduleAdmin = msg.sender == _admin();
-        if (!moduleAdmin) _ensureEoaCaller();
+        bool byOwner = msg.sender == owner;
+        if (!byOwner) _ensureEoaCaller();
         _validateRoleRequest(registryId, checksum, role);
         bool recordScoped = _ensureRoleScopeExists(registryId, checksum);
 
         bytes32 role_ = _scopedRole(registryId, checksum, role, recordScoped);
         _setRoleAdmin(role_, Roles.forRegistry(registryId, Roles.ADMIN));
 
-        // Break-glass: the module admin may seed a registry admin, and nothing else.
-        if (!recordScoped && _isAdmin(role) && moduleAdmin) {
+        // Break-glass: the owner may seed a registry admin, and nothing else.
+        if (!recordScoped && _isAdmin(role) && byOwner) {
             _grantRoleUnchecked(role_, account);
         } else {
             _grantRole(role_, account, msg.sender);
@@ -200,6 +200,16 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         _revokeRole(role_, account, msg.sender);
 
         emit RevokeRole(msg.sender, registryId, checksum, account, role);
+    }
+
+    /// @dev `msgServer.UpdateParams`. No EOA gate, as the owner may be a contract; zero is
+    ///      refused, as nothing here could name an owner again.
+    function transferOwnership(address newOwner) external {
+        require(msg.sender == owner, "sender not the owner");
+        require(newOwner != address(0), "owner cannot be zero");
+        owner = newOwner;
+
+        emit OwnershipTransferred(msg.sender, newOwner);
     }
 
     // ---- queries ----

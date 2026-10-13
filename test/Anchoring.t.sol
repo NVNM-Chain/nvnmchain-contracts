@@ -252,45 +252,53 @@ contract AnchoringTest is AnchoringFixture {
         anchoring.grantRole(id, "", carol, Roles.EDITOR);
     }
 
-    /// Break-glass: the module admin installs a registry admin without holding the role.
-    function test_the_module_admin_can_install_a_registry_admin() public {
-        _breakGlass(moduleAdmin);
+    /// Break-glass: the owner installs a registry admin without holding the role.
+    function test_the_owner_can_install_a_registry_admin() public {
+        _breakGlass(owner);
     }
 
     /// A chain that names a contract relays through it, so the sender has code and is not the
     /// origin. The skip is the only reason either reaches `Anchoring`.
-    function test_the_module_admin_may_be_a_contract() public {
-        vm.etch(moduleAdmin, CONTRACT_CODE);
+    function test_the_owner_may_be_a_contract() public {
+        vm.etch(owner, CONTRACT_CODE);
         _breakGlass(RELAYER);
+
+        vm.prank(owner, RELAYER);
+        anchoring.transferOwnership(carol);
+        assertEq(anchoring.owner(), carol);
     }
 
-    /// The migration writes the source chain's admin into the slot this build stopped reading, so
-    /// the address it names carries no more standing than any other.
-    function test_the_slot_the_dump_writes_names_nobody() public {
-        Anchoring shipped = new Anchoring(); // names no admin, as the shipped build does
+    /// A chain launches with no owner, and the slot the migration writes the source chain's admin
+    /// into does not make one.
+    function test_a_launched_contract_has_no_owner() public {
+        Anchoring launched = new Anchoring();
+        assertEq(launched.owner(), address(0));
         _as(alice);
-        uint64 id = shipped.addRegistry("us-ca1", "First Circuit", "{}");
+        uint64 id = launched.addRegistry("us-ca1", "First Circuit", "{}");
 
         bytes32 header = bytes32(uint256(3));
-        uint256 packed = uint256(vm.load(address(shipped), header));
-        vm.store(address(shipped), header, bytes32(packed | uint256(uint160(moduleAdmin))));
+        uint256 packed = uint256(vm.load(address(launched), header));
+        vm.store(address(launched), header, bytes32(packed | uint256(uint160(owner))));
 
-        _as(moduleAdmin);
+        _as(owner);
         vm.expectRevert("missing required role");
-        shipped.grantRole(id, "", carol, Roles.ADMIN);
+        launched.grantRole(id, "", carol, Roles.ADMIN);
+        _as(owner);
+        vm.expectRevert("sender not the owner");
+        launched.transferOwnership(owner);
     }
 
     /// The break-glass is a grant: `revokeRole` carries no skip, so an admin cannot take one back.
-    function test_the_module_admin_cannot_revoke() public {
+    function test_the_owner_cannot_revoke() public {
         uint64 id = _registry(alice);
-        vm.etch(moduleAdmin, CONTRACT_CODE);
+        vm.etch(owner, CONTRACT_CODE);
 
-        vm.prank(moduleAdmin, RELAYER);
+        vm.prank(owner, RELAYER);
         vm.expectRevert("sender not an eoa");
         anchoring.revokeRole(id, "", alice, Roles.ADMIN);
     }
 
-    /// The skip names the module admin alone.
+    /// The skip names the owner alone.
     function test_another_contract_cannot_grant() public {
         uint64 id = _registry(alice);
         Caller proxy = new Caller(anchoring);
@@ -388,6 +396,36 @@ contract AnchoringTest is AnchoringFixture {
         anchoring.registriesByName("", 1, _page(0, 0));
     }
 
+    // ---- transferOwnership ----
+
+    /// The one it leaves keeps nothing.
+    function test_the_owner_hands_itself_over() public {
+        uint64 id = _registry(alice);
+
+        vm.expectEmit(true, true, false, true);
+        emit Anchoring.OwnershipTransferred(owner, carol);
+        _as(owner);
+        anchoring.transferOwnership(carol);
+        assertEq(anchoring.owner(), carol);
+
+        _as(carol);
+        anchoring.grantRole(id, "", bob, Roles.ADMIN);
+        assertTrue(anchoring.hasRole(Roles.forRegistry(id, Roles.ADMIN), bob));
+
+        _as(owner);
+        vm.expectRevert("missing required role");
+        anchoring.grantRole(id, "", carol, Roles.ADMIN);
+        _as(owner);
+        vm.expectRevert("sender not the owner");
+        anchoring.transferOwnership(owner);
+    }
+
+    function test_the_ownership_cannot_go_to_zero() public {
+        _as(owner);
+        vm.expectRevert("owner cannot be zero");
+        anchoring.transferOwnership(address(0));
+    }
+
     // ---- the EOA gate ----
 
     function test_a_contract_cannot_call_a_transaction_method() public {
@@ -414,16 +452,16 @@ contract AnchoringTest is AnchoringFixture {
 
     // ---- helpers ----
 
-    /// The break-glass, from a module admin whose transaction `origin` sent: a registry admin
+    /// The break-glass, from an owner whose transaction `origin` sent: a registry admin
     /// lands, and no other role does.
     function _breakGlass(address origin) private {
         uint64 id = _registry(alice);
 
-        vm.prank(moduleAdmin, origin);
+        vm.prank(owner, origin);
         anchoring.grantRole(id, "", carol, Roles.ADMIN);
         assertTrue(anchoring.hasRole(Roles.forRegistry(id, Roles.ADMIN), carol));
 
-        vm.prank(moduleAdmin, origin);
+        vm.prank(owner, origin);
         vm.expectRevert("missing required role");
         anchoring.grantRole(id, "", carol, Roles.EDITOR);
     }
