@@ -10,9 +10,10 @@ import {Roles} from "./Roles.sol";
 /// @title Anchoring
 /// @notice x/anchoring with its state in EVM storage: the precompile's methods, selectors and
 ///         events, over the whole `Record`.
-/// @dev Each method names the keeper function it ports. A caller sees four differences: exact
+/// @dev Each method names the keeper function it ports. A caller sees five differences: exact
 ///      name match folding ASCII case, timestamps with no sub-second part, shorter revert
-///      strings where one formats a value, and no reason at all on a call carrying value.
+///      strings where one formats a value, no reason at all on a call carrying value, and no
+///      EOA gate: the one the precompile had closed an IBC callback path this chain lacks.
 ///      The storage layout is the migration's interface; `test/StorageLayout.t.sol` pins it.
 contract Anchoring is IAnchoring, AnchoringRBAC {
     string internal constant HRP = "nvnm"; // the bech32 prefix of `Registry.creator`
@@ -71,7 +72,6 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         external
         returns (uint64 registryId)
     {
-        _ensureEoaCaller();
         require(bytes(name).length != 0, "name cannot be empty");
         require(bytes(name).length <= MAX_NAME, "name exceeds max length");
         require(bytes(description).length <= MAX_DESCRIPTION, "description exceeds max length");
@@ -100,7 +100,6 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// @dev `keeper.AddRecord`. The chain sets `recordId`, `index`, `isLatest` and `timestamp`;
     ///      a checksum the registry already has gets a new version, not a new record.
     function addRecord(Record calldata record) external returns (uint64 recordId) {
-        _ensureEoaCaller();
         _validateRecordForCreate(record);
 
         uint64 registryId = record.registryId;
@@ -141,8 +140,6 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// @dev `keeper.UpdateRecordStatus`, checked against the stored checksum so a record role
     ///      reaches every version.
     function updateRecordStatus(uint64 registryId, uint64 recordId, uint64 index, string calldata status) external {
-        _ensureEoaCaller();
-
         // `MsgUpdateRecordStatus.ValidateBasic`'s order, which decides the error a caller sees.
         require(recordId != 0, "record ID cannot be zero");
         _validateStatus(status);
@@ -159,11 +156,8 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
 
     /// @inheritdoc IAnchoring
     /// @dev `msgServer.GrantRole`. A checksum scopes the role to that record; either way the
-    ///      registry's admin role administers it. The owner skips the EOA gate, so it can be a
-    ///      contract.
+    ///      registry's admin role administers it.
     function grantRole(uint64 registryId, string calldata checksum, address account, string calldata role) external {
-        bool byOwner = msg.sender == owner;
-        if (!byOwner) _ensureEoaCaller();
         _validateRoleRequest(registryId, checksum, role);
         bool recordScoped = _ensureRoleScopeExists(registryId, checksum);
 
@@ -171,7 +165,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         _setRoleAdmin(role_, Roles.forRegistry(registryId, Roles.ADMIN));
 
         // Break-glass: the owner may seed a registry admin, and nothing else.
-        if (!recordScoped && _isAdmin(role) && byOwner) {
+        if (!recordScoped && _isAdmin(role) && msg.sender == owner) {
             _grantRoleUnchecked(role_, account);
         } else {
             _grantRole(role_, account, msg.sender);
@@ -183,7 +177,6 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// @inheritdoc IAnchoring
     /// @dev `msgServer.RevokeRole`, with its checks in the module's order.
     function revokeRole(uint64 registryId, string calldata checksum, address account, string calldata role) external {
-        _ensureEoaCaller();
         // The precompile checks the role before `ValidateBasic`, so a caller sees it first.
         require(bytes(role).length != 0, "role cannot be empty");
         _validateRoleRequest(registryId, checksum, role);
@@ -202,8 +195,8 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         emit RevokeRole(msg.sender, registryId, checksum, account, role);
     }
 
-    /// @dev `msgServer.UpdateParams`. No EOA gate, as the owner may be a contract. Zero freezes
-    ///      the break-glass: nothing here could name an owner again.
+    /// @dev `msgServer.UpdateParams`. Zero freezes the break-glass: nothing here could name an
+    ///      owner again.
     function transferOwnership(address newOwner) external {
         require(msg.sender == owner, "sender not the owner");
         owner = newOwner;
@@ -323,24 +316,6 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     }
 
     // ---- gates and validation ----
-
-    /// `Precompile.ensureEOACaller`, kept as it was: whether a contract may anchor on a user's
-    /// behalf is not this port's to decide.
-    function _ensureEoaCaller() private view {
-        require(msg.sender == tx.origin, "sender not an eoa");
-
-        address sender = msg.sender;
-        uint256 size;
-        assembly ("memory-safe") {
-            size := extcodesize(sender)
-        }
-        if (size == 0) return;
-
-        // `isEOACode` also admits an EIP-7702 delegation: 0xef0100 and the delegate's address.
-        require(size == 23, "sender not an eoa");
-        bytes memory code = sender.code;
-        require(uint8(code[0]) == 0xef && uint8(code[1]) == 0x01 && uint8(code[2]) == 0x00, "sender not an eoa");
-    }
 
     /// `types.ValidateRecordForCreate`.
     function _validateRecordForCreate(Record calldata record) private pure {

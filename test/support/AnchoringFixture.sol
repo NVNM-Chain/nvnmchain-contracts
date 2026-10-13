@@ -25,9 +25,8 @@ abstract contract AnchoringFixture is Test {
         vm.store(address(anchoring), bytes32(OWNER_SLOT), bytes32(uint256(uint160(owner))));
     }
 
-    /// Sender and origin both, as the EOA gate requires.
     function _as(address who) internal {
-        vm.prank(who, who);
+        vm.prank(who);
     }
 
     /// A record to submit. The chain sets the timestamp, ids and `isLatest`, so these are ignored.
