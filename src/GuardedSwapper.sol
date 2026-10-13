@@ -1,0 +1,118 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.23;
+
+import {BPS} from "./Constants.sol";
+import {FeeRouterFactory} from "./FeeRouter.sol";
+import {ISwapper} from "./interfaces/ISwapper.sol";
+import {Ownable} from "solady/auth/Ownable.sol";
+import {ReentrancyGuard} from "solady/utils/ReentrancyGuard.sol";
+import {SafeTransferLib} from "solady/utils/SafeTransferLib.sol";
+
+/// @title GuardedSwapper
+/// @notice The `ISwapper` fee buybacks run through: one fixed (tokenIn → tokenOut) pair behind a
+///         per-swap size cap and a minimum execution price, so a sandwiched pool makes the swap
+///         revert instead of donating the buyback. Routers hold the funds and retry.
+/// @dev The floor is the owner-seeded `refPrice` less `maxDriftBps`, and moves only when the
+///      owner reseeds. A market that has fallen past the band waits, held on the routers; one
+///      that has risen is bought down to the old floor until the reseed, which is the owner's
+///      watch. Nothing here follows the price, so nothing here can be walked.
+///
+///      `swap` is routers-only: the buyback market is the flush path's, not a public venue, and
+///      the gate keeps the inner market's allowance and whatever this contract holds to it. It
+///      is also guarded: a market re-entering through another router would be read across the
+///      balances this swap is measured by.
+contract GuardedSwapper is Ownable, ReentrancyGuard, ISwapper {
+    uint256 private constant WAD = 1e18;
+
+    address public immutable tokenIn; // fee stablecoin
+    address public immutable tokenOut; // NVNM
+
+    address public inner; // the actual market
+    address public routerFactory; // FeeRouterFactory whose routers may swap
+    uint256 public maxAmountIn; // per-swap size cap
+    uint256 public maxDriftBps; // allowed drop below the seeded reference price
+    uint256 public refPrice; // owner-seeded reference, tokenOut per WAD tokenIn; 0 until seeded
+
+    event GuardsSet(address inner, uint256 maxAmountIn);
+    event DriftBandSet(uint256 maxDriftBps);
+    event RouterFactorySet(address routerFactory);
+    event PriceSeeded(uint256 price);
+    event GuardedSwap(uint256 amountIn, uint256 amountOut, uint256 price);
+
+    error WrongPair();
+    error NotSeeded();
+    error InvalidBps();
+    error ZeroAmount();
+    error AmountTooLarge();
+    error PriceBelowFloor();
+    error PartialFill();
+    error NotAuthorized();
+
+    constructor(address owner_, address tokenIn_, address tokenOut_) {
+        _initializeOwner(owner_);
+        tokenIn = tokenIn_;
+        tokenOut = tokenOut_;
+    }
+
+    function setGuards(address inner_, uint256 maxAmountIn_) external onlyOwner {
+        inner = inner_;
+        maxAmountIn = maxAmountIn_;
+        emit GuardsSet(inner_, maxAmountIn_);
+    }
+
+    /// @notice How far below `refPrice` execution may fall. 0 pins the floor to `refPrice`, which
+    ///         a pool's own price impact falls short of, so set a band; BPS would be no floor at
+    ///         all, and is refused.
+    function setDriftBand(uint256 maxDriftBps_) external onlyOwner {
+        if (maxDriftBps_ >= BPS) revert InvalidBps();
+        maxDriftBps = maxDriftBps_;
+        emit DriftBandSet(maxDriftBps_);
+    }
+
+    /// @notice The `FeeRouterFactory` whose routers may call `swap`. 0 stops every swap.
+    function setRouterFactory(address routerFactory_) external onlyOwner {
+        routerFactory = routerFactory_;
+        emit RouterFactorySet(routerFactory_);
+    }
+
+    /// @notice Seed or reset the reference price (tokenOut per 1e18 tokenIn).
+    function seedPrice(uint256 price) external onlyOwner {
+        refPrice = price;
+        emit PriceSeeded(price);
+    }
+
+    function swap(address tokenIn_, address tokenOut_, uint256 amountIn, uint256 minOut)
+        external
+        nonReentrant
+        returns (uint256 out)
+    {
+        if (!_authorized(msg.sender)) revert NotAuthorized();
+        if (tokenIn_ != tokenIn || tokenOut_ != tokenOut) revert WrongPair();
+        uint256 ref = refPrice;
+        address market = inner;
+        if (market == address(0) || ref == 0) revert NotSeeded();
+        if (amountIn == 0) revert ZeroAmount();
+        if (amountIn > maxAmountIn) revert AmountTooLarge();
+
+        uint256 idle = SafeTransferLib.balanceOf(tokenIn, address(this));
+        SafeTransferLib.safeTransferFrom(tokenIn, msg.sender, address(this), amountIn);
+        SafeTransferLib.safeApproveWithRetry(tokenIn, market, amountIn);
+        uint256 held = SafeTransferLib.balanceOf(tokenOut, address(this));
+        ISwapper(market).swap(tokenIn, tokenOut, amountIn, minOut);
+        // What a market leaves, or sends back, would stay here: nothing sends it on.
+        if (SafeTransferLib.balanceOf(tokenIn, address(this)) > idle) revert PartialFill();
+        // What arrived, not what the market reports: an overstated `out` would clear the floor
+        // and be paid from whatever tokenOut this contract already holds.
+        out = SafeTransferLib.balanceOf(tokenOut, address(this)) - held;
+
+        uint256 price = (out * WAD) / amountIn;
+        if (price < (ref * (BPS - maxDriftBps)) / BPS) revert PriceBelowFloor();
+        SafeTransferLib.safeTransfer(tokenOut, msg.sender, out);
+        emit GuardedSwap(amountIn, out, price);
+    }
+
+    function _authorized(address caller) private view returns (bool) {
+        address factory = routerFactory;
+        return factory != address(0) && FeeRouterFactory(factory).isRouter(caller);
+    }
+}
