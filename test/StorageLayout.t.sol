@@ -39,9 +39,14 @@ contract StorageLayoutTest is AnchoringFixture {
         uint256 packed = uint256(_at(FORMER_ADMIN));
         assertEq(uint64(packed >> 160), 1, "registry count at offset 20");
 
-        vm.store(address(anchoring), bytes32(FORMER_ADMIN), bytes32(packed | uint256(uint160(moduleAdmin))));
-        assertEq(address(uint160(uint256(_at(FORMER_ADMIN)))), moduleAdmin, "the dump's write did not land");
+        vm.store(address(anchoring), bytes32(FORMER_ADMIN), bytes32(packed | uint256(uint160(owner))));
+        assertEq(address(uint160(uint256(_at(FORMER_ADMIN)))), owner, "the dump's write did not land");
         assertEq(uint64(uint256(_at(FORMER_ADMIN)) >> 160), 1, "the count moved");
+    }
+
+    /// The fixture wrote this slot, as genesis or a fork does.
+    function test_the_owner_is_the_last_slot() public view {
+        assertEq(anchoring.owner(), owner);
     }
 
     /// `mapping(uint64 => Registry)`: six slots up from the hashed key.
