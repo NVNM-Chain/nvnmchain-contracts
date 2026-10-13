@@ -202,11 +202,10 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         emit RevokeRole(msg.sender, registryId, checksum, account, role);
     }
 
-    /// @dev `msgServer.UpdateParams`. No EOA gate, as the owner may be a contract; zero is
-    ///      refused, as nothing here could name an owner again.
+    /// @dev `msgServer.UpdateParams`. No EOA gate, as the owner may be a contract. Zero freezes
+    ///      the break-glass: nothing here could name an owner again.
     function transferOwnership(address newOwner) external {
         require(msg.sender == owner, "sender not the owner");
-        require(newOwner != address(0), "owner cannot be zero");
         owner = newOwner;
 
         emit OwnershipTransferred(msg.sender, newOwner);
