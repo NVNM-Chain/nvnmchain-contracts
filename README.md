@@ -12,7 +12,7 @@ where the precompile took only an EOA.
 
 The corpus arrives through the chain repo's dump writer (`x/anchoring/evmlayout`), not
 transactions, so `layout/` is an interface: the slot layout, the slots the contract writes for
-`test/SeedFixture.t.sol`'s corpus, and the runtime code for Tempo's genesis alloc.
+`test/SeedFixture.t.sol`'s corpus, and what Tempo deploys and places, from `test/Deployment.t.sol`.
 
 ## Develop
 

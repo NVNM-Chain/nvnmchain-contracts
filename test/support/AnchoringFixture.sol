@@ -2,10 +2,11 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {LibClone} from "solady/utils/LibClone.sol";
 import {Anchoring} from "../../src/Anchoring.sol";
 import {IAnchoring} from "../../src/IAnchoring.sol";
 
-/// A fresh contract at a fixed block time, with the accounts and inputs the suites share.
+/// A fresh proxied contract at a fixed block time, with the accounts and inputs the suites share.
 abstract contract AnchoringFixture is Test {
     Anchoring internal anchoring;
 
@@ -20,9 +21,13 @@ abstract contract AnchoringFixture is Test {
     string internal constant URI = "https://www.courtlistener.com/opinion/8857414/richmond-v-atwood/"; // > 32 bytes
 
     function setUp() public virtual {
-        anchoring = new Anchoring();
+        anchoring = _deploy();
         vm.warp(AT);
         vm.store(address(anchoring), bytes32(OWNER_SLOT), bytes32(uint256(uint160(owner))));
+    }
+
+    function _deploy() internal returns (Anchoring) {
+        return Anchoring(LibClone.deployERC1967(address(new Anchoring())));
     }
 
     function _as(address who) internal {

@@ -255,7 +255,7 @@ contract AnchoringTest is AnchoringFixture {
     /// A chain launches with no owner, and the slot the migration writes the source chain's admin
     /// into does not make one.
     function test_a_launched_contract_has_no_owner() public {
-        Anchoring launched = new Anchoring();
+        Anchoring launched = _deploy();
         assertEq(launched.owner(), address(0));
         _as(alice);
         uint64 id = launched.addRegistry("us-ca1", "First Circuit", "{}");

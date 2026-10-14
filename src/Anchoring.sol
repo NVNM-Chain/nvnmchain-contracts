@@ -6,6 +6,7 @@ import {Bech32} from "./Bech32.sol";
 import {GoTime} from "./GoTime.sol";
 import {IAnchoring} from "./IAnchoring.sol";
 import {Roles} from "./Roles.sol";
+import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 
 /// @title Anchoring
 /// @notice x/anchoring with its state in EVM storage: the precompile's methods, selectors and
@@ -15,7 +16,9 @@ import {Roles} from "./Roles.sol";
 ///      strings where one formats a value, no reason at all on a call carrying value, and no
 ///      EOA gate: the one the precompile had closed an IBC callback path this chain lacks.
 ///      The storage layout is the migration's interface; `test/StorageLayout.t.sol` pins it.
-contract Anchoring is IAnchoring, AnchoringRBAC {
+///      It runs behind an ERC-1967 proxy at `0x…0a00`, which the owner upgrades; called at its
+///      own address it writes nothing.
+contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     string internal constant HRP = "nvnm"; // the bech32 prefix of `Registry.creator`
 
     /// Field limits in bytes, from `types/record_validation.go` and `types/registry_validation.go`.
@@ -64,12 +67,18 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// fork names the first, in a slot past every one the migration writes.
     address public owner;
 
+    modifier onlyOwner() {
+        require(msg.sender == owner, "sender not the owner");
+        _;
+    }
+
     // ---- transactions ----
 
     /// @inheritdoc IAnchoring
     /// @dev `keeper.AddRegistry`. The creator is granted admin unchecked: nobody holds the role yet.
     function addRegistry(string calldata name, string calldata description, string calldata metadata)
         external
+        onlyProxy
         returns (uint64 registryId)
     {
         require(bytes(name).length != 0, "name cannot be empty");
@@ -99,7 +108,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// @inheritdoc IAnchoring
     /// @dev `keeper.AddRecord`. The chain sets `recordId`, `index`, `isLatest` and `timestamp`;
     ///      a checksum the registry already has gets a new version, not a new record.
-    function addRecord(Record calldata record) external returns (uint64 recordId) {
+    function addRecord(Record calldata record) external onlyProxy returns (uint64 recordId) {
         _validateRecordForCreate(record);
 
         uint64 registryId = record.registryId;
@@ -139,7 +148,10 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// @inheritdoc IAnchoring
     /// @dev `keeper.UpdateRecordStatus`, checked against the stored checksum so a record role
     ///      reaches every version.
-    function updateRecordStatus(uint64 registryId, uint64 recordId, uint64 index, string calldata status) external {
+    function updateRecordStatus(uint64 registryId, uint64 recordId, uint64 index, string calldata status)
+        external
+        onlyProxy
+    {
         // `MsgUpdateRecordStatus.ValidateBasic`'s order, which decides the error a caller sees.
         require(recordId != 0, "record ID cannot be zero");
         _validateStatus(status);
@@ -157,7 +169,10 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
     /// @inheritdoc IAnchoring
     /// @dev `msgServer.GrantRole`. A checksum scopes the role to that record; either way the
     ///      registry's admin role administers it.
-    function grantRole(uint64 registryId, string calldata checksum, address account, string calldata role) external {
+    function grantRole(uint64 registryId, string calldata checksum, address account, string calldata role)
+        external
+        onlyProxy
+    {
         _validateRoleRequest(registryId, checksum, role);
         bool recordScoped = _ensureRoleScopeExists(registryId, checksum);
 
@@ -176,7 +191,10 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
 
     /// @inheritdoc IAnchoring
     /// @dev `msgServer.RevokeRole`, with its checks in the module's order.
-    function revokeRole(uint64 registryId, string calldata checksum, address account, string calldata role) external {
+    function revokeRole(uint64 registryId, string calldata checksum, address account, string calldata role)
+        external
+        onlyProxy
+    {
         // The precompile checks the role before `ValidateBasic`, so a caller sees it first.
         require(bytes(role).length != 0, "role cannot be empty");
         _validateRoleRequest(registryId, checksum, role);
@@ -195,14 +213,15 @@ contract Anchoring is IAnchoring, AnchoringRBAC {
         emit RevokeRole(msg.sender, registryId, checksum, account, role);
     }
 
-    /// @dev `msgServer.UpdateParams`. Zero freezes the break-glass: nothing here could name an
-    ///      owner again.
-    function transferOwnership(address newOwner) external {
-        require(msg.sender == owner, "sender not the owner");
+    /// @dev `msgServer.UpdateParams`. Zero freezes the break-glass and upgrades: nothing here
+    ///      could name an owner again.
+    function transferOwnership(address newOwner) external onlyProxy onlyOwner {
         owner = newOwner;
 
         emit OwnershipTransferred(msg.sender, newOwner);
     }
+
+    function _authorizeUpgrade(address) internal view override onlyOwner {}
 
     // ---- queries ----
 

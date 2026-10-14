@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {LibClone} from "solady/utils/LibClone.sol";
 import {Anchoring} from "../src/Anchoring.sol";
 import {IAnchoring} from "../src/IAnchoring.sol";
 
@@ -20,7 +21,7 @@ contract SeedFixtureTest is Test {
     /// Chosen for what a writer gets wrong: a uri on each side of 32 bytes, a second version,
     /// one checksum in two registries, a duplicate name in another case, and empty strings.
     function test_write_the_seed_fixture() public {
-        anchoring = new Anchoring();
+        anchoring = Anchoring(LibClone.deployERC1967(address(new Anchoring())));
         vm.warp(AT);
 
         vm.record();
