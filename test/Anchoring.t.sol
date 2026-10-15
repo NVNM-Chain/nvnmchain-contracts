@@ -272,6 +272,22 @@ contract AnchoringTest is AnchoringFixture {
         launched.transferOwnership(owner);
     }
 
+    /// Neither an admin nor the owner's break-glass can make the zero address a holder, which would
+    /// let the last real admin leave a registry nobody can administer.
+    function test_no_one_grants_a_role_to_the_zero_address() public {
+        uint64 id = _registry(alice);
+        _as(alice);
+        vm.expectRevert("account cannot be the zero address");
+        anchoring.grantRole(id, "", address(0), Roles.ADMIN);
+        _as(owner);
+        vm.expectRevert("account cannot be the zero address");
+        anchoring.grantRole(id, "", address(0), Roles.ADMIN);
+
+        _as(alice);
+        vm.expectRevert("cannot revoke the last registry admin");
+        anchoring.revokeRole(id, "", alice, Roles.ADMIN);
+    }
+
     /// The break-glass is a grant: `revokeRole` has no such path, so the owner cannot take one back.
     function test_the_owner_cannot_revoke() public {
         uint64 id = _registry(alice);

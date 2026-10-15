@@ -11,10 +11,11 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 /// @title Anchoring
 /// @notice x/anchoring with its state in EVM storage: the precompile's methods, selectors and
 ///         events, over the whole `Record`.
-/// @dev Each method names the keeper function it ports. A caller sees five differences: exact
+/// @dev Each method names the keeper function it ports. A caller sees six differences: exact
 ///      name match folding ASCII case, timestamps with no sub-second part, shorter revert
-///      strings where one formats a value, no reason at all on a call carrying value, and no
-///      EOA gate: the one the precompile had closed an IBC callback path this chain lacks.
+///      strings where one formats a value, no reason at all on a call carrying value, no role
+///      for the zero address, and no EOA gate: the one the precompile had closed an IBC callback
+///      path this chain lacks.
 ///      The storage layout is the migration's interface; `test/StorageLayout.t.sol` pins it.
 ///      It runs behind an ERC-1967 proxy at `0x…0a00`, which the owner upgrades; called at its
 ///      own address it answers nothing but `proxiableUUID`.
@@ -174,6 +175,8 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         onlyProxy
     {
         _validateRoleRequest(registryId, checksum, role);
+        // A zero holder would count toward the last-admin guard and act for nobody.
+        require(account != address(0), "account cannot be the zero address");
         bool recordScoped = _ensureRoleScopeExists(registryId, checksum);
 
         bytes32 role_ = _scopedRole(registryId, checksum, role, recordScoped);
