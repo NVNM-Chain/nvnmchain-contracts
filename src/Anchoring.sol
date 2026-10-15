@@ -6,6 +6,7 @@ import {Bech32} from "./Bech32.sol";
 import {GoTime} from "./GoTime.sol";
 import {IAnchoring} from "./IAnchoring.sol";
 import {Roles} from "./Roles.sol";
+import {LibSort} from "solady/utils/LibSort.sol";
 import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 
 /// @title Anchoring
@@ -57,7 +58,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     mapping(uint64 => mapping(string => uint64)) internal _recordIdByChecksum; // `RecordIdByRegistryAndChecksum`
 
     /// `RecordIdByChecksumAndRegistry`, which the module prefix-scans. A mapping cannot be
-    /// scanned, so it is a list, ascending as the scan returns it.
+    /// scanned, so it is a list in write order, which a query sorts into the scan's order.
     mapping(string => uint64[]) internal _registriesByChecksum;
 
     /// The exact-match name index, keyed by `_lower(name)` as the node's index keyed it.
@@ -121,7 +122,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
             recordId = _recordCount[registryId] + 1;
             _recordCount[registryId] = recordId;
             _recordIdByChecksum[registryId][record.checksum] = recordId;
-            _addRegistryForChecksum(record.checksum, registryId);
+            _registriesByChecksum[record.checksum].push(registryId);
         }
 
         uint64 index = _latestIndex[registryId][recordId] + 1;
@@ -476,12 +477,19 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         view
         returns (Record[] memory out)
     {
-        uint64[] storage ids = _registriesByChecksum[checksum];
+        uint64[] storage stored = _registriesByChecksum[checksum];
+        uint256[] memory ids = new uint256[](stored.length);
+        for (uint256 i = 0; i < ids.length; i++) {
+            ids[i] = stored[i];
+        }
+        // Writes only append, so an older registry's first write moves nothing; reads pay to sort.
+        LibSort.sort(ids);
         uint256 n = _window(ids.length, offset, limit);
 
         out = new Record[](n);
         for (uint256 i = 0; i < n; i++) {
-            uint64 registryId = ids[offset + i];
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint64 registryId = uint64(ids[offset + i]);
             uint64 recordId = _recordIdByChecksum[registryId][checksum];
             out[i] = _load(registryId, recordId, _latestIndex[registryId][recordId]);
         }
@@ -515,19 +523,6 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         assembly ("memory-safe") {
             mstore(out, n)
         }
-    }
-
-    /// Keeps the list ascending, the order of the module's prefix scan. A seed appends in
-    /// order, so this is usually one comparison.
-    function _addRegistryForChecksum(string calldata checksum, uint64 registryId) private {
-        uint64[] storage ids = _registriesByChecksum[checksum];
-        ids.push(registryId);
-        uint256 i = ids.length - 1;
-        while (i > 0 && ids[i - 1] > registryId) {
-            ids[i] = ids[i - 1];
-            i--;
-        }
-        ids[i] = registryId;
     }
 
     function _load(uint64 registryId, uint64 recordId, uint64 index) private view returns (Record memory) {
