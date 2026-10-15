@@ -11,12 +11,13 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 /// @title Anchoring
 /// @notice x/anchoring with its state in EVM storage: the precompile's methods, selectors and
 ///         events, over the whole `Record`.
-/// @dev Each method names the keeper function it ports. A caller sees seven differences: exact
+/// @dev Each method names the keeper function it ports. A caller sees eight differences: exact
 ///      name match folding ASCII case, timestamps with no sub-second part, shorter revert
 ///      strings where one formats a value, no reason at all on a call carrying value, no role
-///      for the zero address, an unfiltered record page that reads at most `MAX_PAGE_LIMIT`
-///      registries and hands back a cursor, and no EOA gate: the one the precompile had closed
-///      an IBC callback path this chain lacks.
+///      for the zero address, a checksum's registries in the order they first anchored it, an
+///      unfiltered record page that reads at most `MAX_PAGE_LIMIT` registries and hands back a
+///      cursor, and no EOA gate: the one the precompile had closed an IBC callback path this
+///      chain lacks.
 ///      The storage layout is the migration's interface; `test/StorageLayout.t.sol` pins it.
 ///      It runs behind an ERC-1967 proxy at `0x…0a00`, which the owner upgrades; called at its
 ///      own address it answers nothing but `proxiableUUID`.
@@ -58,7 +59,8 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     mapping(uint64 => mapping(string => uint64)) internal _recordIdByChecksum; // `RecordIdByRegistryAndChecksum`
 
     /// `RecordIdByChecksumAndRegistry`, which the module prefix-scans. A mapping cannot be
-    /// scanned, so it is a list, ascending as the scan returns it.
+    /// scanned, so it is a list, appended to and never sorted: a write or a page costs the same
+    /// however many registries hold the checksum.
     mapping(string => uint64[]) internal _registriesByChecksum;
 
     /// The exact-match name index, keyed by `_lower(name)` as the node's index keyed it.
@@ -122,7 +124,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
             recordId = _recordCount[registryId] + 1;
             _recordCount[registryId] = recordId;
             _recordIdByChecksum[registryId][record.checksum] = recordId;
-            _addRegistryForChecksum(record.checksum, registryId);
+            _registriesByChecksum[record.checksum].push(registryId);
         }
 
         uint64 index = _latestIndex[registryId][recordId] + 1;
@@ -531,19 +533,6 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         if (registryId <= registryCount) {
             page.nextKey = abi.encodePacked(registryId, skip);
         }
-    }
-
-    /// Keeps the list ascending, the order of the module's prefix scan. A seed appends in
-    /// order, so this is usually one comparison.
-    function _addRegistryForChecksum(string calldata checksum, uint64 registryId) private {
-        uint64[] storage ids = _registriesByChecksum[checksum];
-        ids.push(registryId);
-        uint256 i = ids.length - 1;
-        while (i > 0 && ids[i - 1] > registryId) {
-            ids[i] = ids[i - 1];
-            i--;
-        }
-        ids[i] = registryId;
     }
 
     function _load(uint64 registryId, uint64 recordId, uint64 index) private view returns (Record memory) {
