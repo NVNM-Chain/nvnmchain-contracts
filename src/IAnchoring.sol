@@ -32,7 +32,8 @@ interface IAnchoring {
         string metadata;
     }
 
-    /// The Cosmos paging pair. `key`/`nextKey` are a KV cursor only `registries` uses.
+    /// The Cosmos paging pair. `key`/`nextKey` are a cursor `registries` and the unfiltered
+    /// `records` page use.
     struct PageRequest {
         bytes key;
         uint64 offset;

@@ -186,6 +186,64 @@ contract AnchoringQueriesTest is AnchoringFixture {
         assertEq(got.length, 50);
     }
 
+    /// Following the cursor returns every record once, in order, across full and empty registries.
+    function test_an_empty_filter_cursor_walks_every_record_once() public {
+        uint64 a = _registryWith(3);
+        _registry(); // empty
+        uint64 c = _registryWith(2);
+        _registry(); // empty, and last
+
+        uint64[2][5] memory want = [[a, 1], [a, 2], [a, 3], [c, 1], [c, 2]];
+        bytes memory key;
+        uint256 seen;
+        for (uint256 calls = 0; calls < 10; calls++) {
+            (IAnchoring.Record[] memory got, IAnchoring.PageResponse memory page) =
+                anchoring.records(0, "", 0, 0, _cursor(key, 2, false));
+            for (uint256 i = 0; i < got.length; i++) {
+                assertEq(got[i].registryId, want[seen][0]);
+                assertEq(got[i].recordId, want[seen][1]);
+                seen++;
+            }
+            if (page.nextKey.length == 0) break;
+            key = page.nextKey;
+        }
+        assertEq(seen, 5, "every record once");
+    }
+
+    /// A run of empty registries as long as one call reads costs a bounded call and a cursor,
+    /// not a page that no call budget can serve.
+    function test_an_empty_filter_page_reads_a_bounded_run_of_registries() public {
+        for (uint256 i = 0; i < 200; i++) {
+            _registry();
+        }
+        uint64 last = _registryWith(1);
+
+        vm.cool(address(anchoring));
+        uint256 before = gasleft();
+        (IAnchoring.Record[] memory first, IAnchoring.PageResponse memory page) =
+            anchoring.records(0, "", 0, 0, _page(0, 1));
+        uint256 used = before - gasleft();
+        assertEq(first.length, 0, "the scan ran out before the record");
+        assertEq(page.nextKey, abi.encodePacked(last, uint64(0)));
+        assertLt(used, 1_000_000);
+
+        (IAnchoring.Record[] memory second, IAnchoring.PageResponse memory end) =
+            anchoring.records(0, "", 0, 0, _cursor(page.nextKey, 1, false));
+        assertEq(second.length, 1);
+        assertEq(second[0].registryId, last);
+        assertEq(end.nextKey.length, 0, "the last page has no cursor");
+    }
+
+    function test_an_empty_filter_takes_an_offset_or_a_key_not_both() public {
+        _registryWith(2);
+        IAnchoring.PageRequest memory both = _cursor(abi.encodePacked(uint64(1), uint64(0)), 1, false);
+        both.offset = 1;
+        vm.expectRevert("invalid request, either offset or key is expected, got both");
+        anchoring.records(0, "", 0, 0, both);
+        vm.expectRevert("invalid pagination key");
+        anchoring.records(0, "", 0, 0, _cursor(hex"01", 1, false));
+    }
+
     // ---- registries ----
 
     function test_a_registry_id_returns_just_that_one() public {
