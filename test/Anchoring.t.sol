@@ -255,7 +255,7 @@ contract AnchoringTest is AnchoringFixture {
     /// A chain launches with no owner, and the slot the migration writes the source chain's admin
     /// into does not make one.
     function test_a_launched_contract_has_no_owner() public {
-        Anchoring launched = new Anchoring();
+        Anchoring launched = _deploy();
         assertEq(launched.owner(), address(0));
         _as(alice);
         uint64 id = launched.addRegistry("us-ca1", "First Circuit", "{}");
@@ -270,6 +270,22 @@ contract AnchoringTest is AnchoringFixture {
         _as(owner);
         vm.expectRevert("sender not the owner");
         launched.transferOwnership(owner);
+    }
+
+    /// Neither an admin nor the owner's break-glass can make the zero address a holder, which would
+    /// let the last real admin leave a registry nobody can administer.
+    function test_no_one_grants_a_role_to_the_zero_address() public {
+        uint64 id = _registry(alice);
+        _as(alice);
+        vm.expectRevert("account cannot be the zero address");
+        anchoring.grantRole(id, "", address(0), Roles.ADMIN);
+        _as(owner);
+        vm.expectRevert("account cannot be the zero address");
+        anchoring.grantRole(id, "", address(0), Roles.ADMIN);
+
+        _as(alice);
+        vm.expectRevert("cannot revoke the last registry admin");
+        anchoring.revokeRole(id, "", alice, Roles.ADMIN);
     }
 
     /// The break-glass is a grant: `revokeRole` has no such path, so the owner cannot take one back.
@@ -409,19 +425,12 @@ contract AnchoringTest is AnchoringFixture {
         anchoring.transferOwnership(owner);
     }
 
-    /// Zero freezes the break-glass, for good as far as the contract is concerned.
-    function test_the_ownership_goes_to_zero() public {
-        uint64 id = _registry(alice);
+    /// Zero would freeze the break-glass and upgrades for good, so it is refused.
+    function test_the_ownership_never_goes_to_zero() public {
         _as(owner);
+        vm.expectRevert("new owner is the zero address");
         anchoring.transferOwnership(address(0));
-        assertEq(anchoring.owner(), address(0));
-
-        _as(owner);
-        vm.expectRevert("missing required role");
-        anchoring.grantRole(id, "", carol, Roles.ADMIN);
-        _as(owner);
-        vm.expectRevert("sender not the owner");
-        anchoring.transferOwnership(owner);
+        assertEq(anchoring.owner(), owner);
     }
 
     // ---- helpers ----

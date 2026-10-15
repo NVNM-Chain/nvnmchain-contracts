@@ -1,27 +1,31 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 pragma solidity ^0.8.28;
 
+import {CallContextChecker} from "solady/utils/CallContextChecker.sol";
+
 /// @title AnchoringRBAC
 /// @notice The tables `x/anchoring/rbac` keeps: each role's admin role and its members.
 /// @dev Not OpenZeppelin's `AccessControl`, whose rules differ: no last-admin guard here, and the
 ///      zero role means "unconfigured". `_roleMemberCount` is added to answer `IsSoleAdmin`.
-abstract contract AnchoringRBAC {
+///      The views are `onlyProxy`, like the rest of the contract: the implementation's own tables
+///      are empty.
+abstract contract AnchoringRBAC is CallContextChecker {
     mapping(bytes32 => bytes32) internal _roleAdmin; // role => the role that administers it
     mapping(bytes32 => mapping(address => bool)) internal _roleMembers;
     mapping(bytes32 => uint256) internal _roleMemberCount;
 
     bytes32 internal constant NO_ROLE = bytes32(0); // `rbac.DefaultRoleAdmin`: unconfigured
 
-    function hasRole(bytes32 role, address account) public view returns (bool) {
+    function hasRole(bytes32 role, address account) public view onlyProxy returns (bool) {
         return _roleMembers[role][account];
     }
 
-    function roleMemberCount(bytes32 role) public view returns (uint256) {
+    function roleMemberCount(bytes32 role) public view onlyProxy returns (uint256) {
         return _roleMemberCount[role];
     }
 
     /// @notice Reverts for an unconfigured role, as `GetRoleAdmin` does, rather than returning zero.
-    function getRoleAdmin(bytes32 role) public view returns (bytes32) {
+    function getRoleAdmin(bytes32 role) public view onlyProxy returns (bytes32) {
         bytes32 admin = _roleAdmin[role];
         require(admin != NO_ROLE, "role admin not configured");
         return admin;

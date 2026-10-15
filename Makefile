@@ -17,8 +17,7 @@ layout:
 	@mkdir -p layout
 	@forge inspect Anchoring storage-layout --json | $(STRIP_AST_IDS) > layout/anchoring.json
 	@forge inspect Anchoring abi --json > layout/anchoring.abi.json
-	@forge test --match-path 'test/SeedFixture.t.sol' >/dev/null
-	@forge inspect Anchoring deployedBytecode > layout/anchoring.bin
+	@forge test --match-path 'test/{SeedFixture,Deployment}.t.sol' >/dev/null
 
 layout-check: layout
 	@git diff --exit-code -- layout || \
