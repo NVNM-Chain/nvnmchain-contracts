@@ -74,8 +74,8 @@ contract AnchoringQueriesTest is AnchoringFixture {
 
     // ---- records: one checksum across registries ----
 
-    /// Ascending by registry, as the module's prefix scan returns it, whatever the write order.
-    function test_a_checksum_scan_is_ordered_by_registry() public {
+    /// In the order registries first anchored it.
+    function test_a_checksum_scan_comes_in_write_order() public {
         uint64 one = _registry();
         uint64 two = _registry();
         uint64 three = _registry();
@@ -86,34 +86,51 @@ contract AnchoringQueriesTest is AnchoringFixture {
 
         (IAnchoring.Record[] memory got,) = anchoring.records(0, "shared", 0, 0, _page(0, 0));
         assertEq(got.length, 3);
-        assertEq(got[0].registryId, one);
-        assertEq(got[1].registryId, two);
-        assertEq(got[2].registryId, three);
+        assertEq(got[0].registryId, three);
+        assertEq(got[1].registryId, one);
+        assertEq(got[2].registryId, two);
     }
 
-    /// An older registry's first write of a checksum costs no more for every newer registry that
-    /// already has it: the index appends rather than shifting them.
+    /// An older registry's first write of a shared checksum shifts none of the newer registries.
     function test_a_shared_checksum_does_not_raise_an_older_registrys_first_write() public {
         uint64 older = _registry();
         for (uint256 i = 0; i < 200; i++) {
             _add(_registry(), "shared");
         }
 
-        vm.cool(address(anchoring));
-        _as(alice);
-        uint256 before = gasleft();
-        anchoring.addRecord(_record(older, "unique"));
-        uint256 alone = before - gasleft();
-
-        vm.cool(address(anchoring));
-        _as(alice);
-        before = gasleft();
-        anchoring.addRecord(_record(older, "shared"));
-        uint256 shared = before - gasleft();
-
+        uint256 alone = _gas(abi.encodeCall(anchoring.addRecord, (_record(older, "unique"))));
+        uint256 shared = _gas(abi.encodeCall(anchoring.addRecord, (_record(older, "shared"))));
         assertLe(shared, alone, "a first write moves none of the newer registries");
-        (IAnchoring.Record[] memory got,) = anchoring.records(0, "shared", 0, 0, _page(0, 1));
-        assertEq(got[0].registryId, older, "and still sorts first");
+        (IAnchoring.Record[] memory got,) = anchoring.records(0, "shared", 0, 0, _page(200, 1));
+        assertEq(got[0].registryId, older, "and comes after them");
+    }
+
+    /// A page reads its own rows, not the list: the same at 303 holders as at 3.
+    function test_a_checksum_page_costs_the_same_however_many_registries_hold_it() public {
+        for (uint256 i = 0; i < 3; i++) {
+            _add(_registry(), "shared");
+        }
+        bytes memory page = abi.encodeCall(anchoring.records, (0, "shared", 0, 0, _page(0, 1)));
+        uint256 few = _gas(page);
+        for (uint256 i = 0; i < 300; i++) {
+            _add(_registry(), "shared");
+        }
+        assertEq(_gas(page), few, "the list's length is not read past the page");
+    }
+
+    /// One cold call as alice, `data` encoded beforehand and nothing copied back: this
+    /// contract's own memory, which every helper call grows, stays out of the measure.
+    function _gas(bytes memory data) internal returns (uint256 used) {
+        address target = address(anchoring);
+        vm.cool(target);
+        _as(alice);
+        bool ok;
+        uint256 before = gasleft();
+        assembly ("memory-safe") {
+            ok := call(gas(), target, 0, add(data, 0x20), mload(data), 0, 0)
+        }
+        used = before - gasleft();
+        assertTrue(ok);
     }
 
     function test_a_checksum_scan_pages() public {

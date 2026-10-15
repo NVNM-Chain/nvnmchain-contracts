@@ -6,17 +6,16 @@ import {Bech32} from "./Bech32.sol";
 import {GoTime} from "./GoTime.sol";
 import {IAnchoring} from "./IAnchoring.sol";
 import {Roles} from "./Roles.sol";
-import {LibSort} from "solady/utils/LibSort.sol";
 import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 
 /// @title Anchoring
 /// @notice x/anchoring with its state in EVM storage: the precompile's methods, selectors and
 ///         events, over the whole `Record`.
-/// @dev Each method names the keeper function it ports. A caller sees six differences: exact
+/// @dev Each method names the keeper function it ports. A caller sees seven differences: exact
 ///      name match folding ASCII case, timestamps with no sub-second part, shorter revert
 ///      strings where one formats a value, no reason at all on a call carrying value, no role
-///      for the zero address, and no EOA gate: the one the precompile had closed an IBC callback
-///      path this chain lacks.
+///      for the zero address, a checksum's registries in the order they first anchored it, and
+///      no EOA gate: the one the precompile had closed an IBC callback path this chain lacks.
 ///      The storage layout is the migration's interface; `test/StorageLayout.t.sol` pins it.
 ///      It runs behind an ERC-1967 proxy at `0x…0a00`, which the owner upgrades; called at its
 ///      own address it answers nothing but `proxiableUUID`.
@@ -58,7 +57,8 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     mapping(uint64 => mapping(string => uint64)) internal _recordIdByChecksum; // `RecordIdByRegistryAndChecksum`
 
     /// `RecordIdByChecksumAndRegistry`, which the module prefix-scans. A mapping cannot be
-    /// scanned, so it is a list in write order, which a query sorts into the scan's order.
+    /// scanned, so it is a list, appended to and never sorted: a write or a page costs the same
+    /// however many registries hold the checksum.
     mapping(string => uint64[]) internal _registriesByChecksum;
 
     /// The exact-match name index, keyed by `_lower(name)` as the node's index keyed it.
@@ -477,19 +477,12 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         view
         returns (Record[] memory out)
     {
-        uint64[] storage stored = _registriesByChecksum[checksum];
-        uint256[] memory ids = new uint256[](stored.length);
-        for (uint256 i = 0; i < ids.length; i++) {
-            ids[i] = stored[i];
-        }
-        // Writes only append, so an older registry's first write moves nothing; reads pay to sort.
-        LibSort.sort(ids);
+        uint64[] storage ids = _registriesByChecksum[checksum];
         uint256 n = _window(ids.length, offset, limit);
 
         out = new Record[](n);
         for (uint256 i = 0; i < n; i++) {
-            // forge-lint: disable-next-line(unsafe-typecast)
-            uint64 registryId = uint64(ids[offset + i]);
+            uint64 registryId = ids[offset + i];
             uint64 recordId = _recordIdByChecksum[registryId][checksum];
             out[i] = _load(registryId, recordId, _latestIndex[registryId][recordId]);
         }
