@@ -168,21 +168,22 @@ contract AnchoringQueriesTest is AnchoringFixture {
         assertEq(seen, 5, "every record once");
     }
 
-    /// A run of empty registries longer than one call reads costs a bounded call and a cursor,
+    /// A run of empty registries as long as one call reads costs a bounded call and a cursor,
     /// not a page that no call budget can serve.
     function test_an_empty_filter_page_reads_a_bounded_run_of_registries() public {
-        for (uint256 i = 0; i < 1000; i++) {
+        for (uint256 i = 0; i < 200; i++) {
             _registry();
         }
         uint64 last = _registryWith(1);
 
+        vm.cool(address(anchoring));
         uint256 before = gasleft();
         (IAnchoring.Record[] memory first, IAnchoring.PageResponse memory page) =
             anchoring.records(0, "", 0, 0, _page(0, 1));
         uint256 used = before - gasleft();
         assertEq(first.length, 0, "the scan ran out before the record");
         assertEq(page.nextKey, abi.encodePacked(last, uint64(0)));
-        assertLt(used, 3_000_000);
+        assertLt(used, 1_000_000);
 
         (IAnchoring.Record[] memory second, IAnchoring.PageResponse memory end) =
             anchoring.records(0, "", 0, 0, _cursor(page.nextKey, 1, false));

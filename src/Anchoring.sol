@@ -14,7 +14,7 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 /// @dev Each method names the keeper function it ports. A caller sees seven differences: exact
 ///      name match folding ASCII case, timestamps with no sub-second part, shorter revert
 ///      strings where one formats a value, no reason at all on a call carrying value, no role
-///      for the zero address, an unfiltered record page that reads at most `MAX_PAGE_SCAN`
+///      for the zero address, an unfiltered record page that reads at most `MAX_PAGE_LIMIT`
 ///      registries and hands back a cursor, and no EOA gate: the one the precompile had closed
 ///      an IBC callback path this chain lacks.
 ///      The storage layout is the migration's interface; `test/StorageLayout.t.sol` pins it.
@@ -35,10 +35,6 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     /// Paging, from `keeper/query.go`.
     uint64 internal constant DEFAULT_PAGE_LIMIT = 50;
     uint64 internal constant MAX_PAGE_LIMIT = 200;
-
-    /// Registries the unfiltered record page reads in one call, empty ones included: storage
-    /// cannot skip them as the module's store did. About 3M gas through the proxy.
-    uint64 internal constant MAX_PAGE_SCAN = 1000;
 
     /// `types.RegistryNameMatchMode`: 0/1 exact, 2 prefix, 3 suffix, 4 contains.
     uint8 internal constant MATCH_EXACT = 1;
@@ -497,8 +493,9 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
 
     /// The newest version of every record, registry by registry. A position is a registry and how
     /// many records to pass from its first, counting on through later ones, so an offset is the
-    /// position (1, offset). The page reads at most `MAX_PAGE_SCAN` registries and returns where
-    /// it stopped as the cursor, 16 bytes big-endian, even when it found nothing.
+    /// position (1, offset). Storage cannot skip empty registries as the module's store did, so a
+    /// page reads at most `MAX_PAGE_LIMIT` registries, enough to fill it unless some are empty,
+    /// and returns where it stopped as the cursor, 16 bytes big-endian, even when it found nothing.
     function _pageOfEverything(uint64 offset, uint64 limit, bytes calldata key)
         private
         view
@@ -518,7 +515,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         // Sized to the limit and trimmed after, which is cheaper than counting first.
         out = new Record[](limit);
         uint64 n = 0;
-        for (uint64 scanned = 0; registryId <= registryCount && n < limit && scanned < MAX_PAGE_SCAN; scanned++) {
+        for (uint64 scanned = 0; registryId <= registryCount && n < limit && scanned < MAX_PAGE_LIMIT; scanned++) {
             uint64 count = _recordCount[registryId];
             while (skip < count && n < limit) {
                 skip++;
