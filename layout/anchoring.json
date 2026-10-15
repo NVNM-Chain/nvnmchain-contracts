@@ -86,7 +86,7 @@
     },
     {
       "contract": "src/Anchoring.sol:Anchoring",
-      "label": "owner",
+      "label": "_owner",
       "offset": 0,
       "slot": "11",
       "type": "t_address"

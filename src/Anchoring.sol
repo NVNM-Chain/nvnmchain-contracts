@@ -17,7 +17,7 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 ///      EOA gate: the one the precompile had closed an IBC callback path this chain lacks.
 ///      The storage layout is the migration's interface; `test/StorageLayout.t.sol` pins it.
 ///      It runs behind an ERC-1967 proxy at `0x…0a00`, which the owner upgrades; called at its
-///      own address it writes nothing.
+///      own address it answers nothing but `proxiableUUID`.
 contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     string internal constant HRP = "nvnm"; // the bech32 prefix of `Registry.creator`
 
@@ -65,10 +65,10 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
 
     /// The module's admin, who may grant a registry admin without holding the role. Genesis or a
     /// fork names the first, in a slot past every one the migration writes.
-    address public owner;
+    address internal _owner;
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "sender not the owner");
+        require(msg.sender == _owner, "sender not the owner");
         _;
     }
 
@@ -180,7 +180,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         _setRoleAdmin(role_, Roles.forRegistry(registryId, Roles.ADMIN));
 
         // Break-glass: the owner may seed a registry admin, and nothing else.
-        if (!recordScoped && _isAdmin(role) && msg.sender == owner) {
+        if (!recordScoped && _isAdmin(role) && msg.sender == _owner) {
             _grantRoleUnchecked(role_, account);
         } else {
             _grantRole(role_, account, msg.sender);
@@ -213,10 +213,11 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         emit RevokeRole(msg.sender, registryId, checksum, account, role);
     }
 
-    /// @dev `msgServer.UpdateParams`. Zero freezes the break-glass and upgrades: nothing here
-    ///      could name an owner again.
+    /// @dev `msgServer.UpdateParams`, in one step as ERC-173 has it. Zero is refused: it would
+    ///      freeze the break-glass and upgrades, and nothing here could name an owner again.
     function transferOwnership(address newOwner) external onlyProxy onlyOwner {
-        owner = newOwner;
+        require(newOwner != address(0), "new owner is the zero address");
+        _owner = newOwner;
 
         emit OwnershipTransferred(msg.sender, newOwner);
     }
@@ -224,6 +225,10 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     function _authorizeUpgrade(address) internal view override onlyOwner {}
 
     // ---- queries ----
+
+    function owner() external view onlyProxy returns (address) {
+        return _owner;
+    }
 
     /// @inheritdoc IAnchoring
     /// @dev `queryServer.Records`: its five shapes, in its order. Record ids are `1..count`, so
@@ -234,7 +239,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         uint64 recordId,
         uint64 index,
         PageRequest calldata pagination
-    ) external view returns (Record[] memory recordsOut, PageResponse memory paginationOut) {
+    ) external view onlyProxy returns (Record[] memory recordsOut, PageResponse memory paginationOut) {
         require(recordId == 0 || registryId != 0, "record_id requires registry_id");
         require(
             index == 0 || (registryId != 0 && (recordId != 0 || bytes(checksum).length != 0)),
@@ -274,6 +279,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     function registries(uint64 registryId, PageRequest calldata pagination)
         external
         view
+        onlyProxy
         returns (Registry[] memory registriesOut, PageResponse memory paginationOut)
     {
         if (registryId != 0) {
@@ -316,6 +322,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     function registriesByName(string calldata name, uint8 matchMode, PageRequest calldata pagination)
         external
         view
+        onlyProxy
         returns (Registry[] memory registriesOut, PageResponse memory paginationOut)
     {
         require(matchMode <= MATCH_MAX, "invalid matchMode: want 0/1 exact, 2 prefix, 3 suffix, 4 contains");

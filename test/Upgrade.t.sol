@@ -33,14 +33,14 @@ contract UpgradeTest is AnchoringFixture {
         anchoring.upgradeToAndCall(next, "");
     }
 
-    /// An owner handed to zero can never be named again, so neither can new code.
+    /// A proxy without an owner, as T12 leaves one whose validator registry had none, takes no new
+    /// code.
     function test_without_an_owner_no_one_upgrades() public {
-        _as(owner);
-        anchoring.transferOwnership(address(0));
+        Anchoring unowned = _deploy();
         address next = address(new Anchoring());
         _as(owner);
         vm.expectRevert("sender not the owner");
-        anchoring.upgradeToAndCall(next, "");
+        unowned.upgradeToAndCall(next, "");
     }
 
     /// Code that cannot take the next upgrade would strand the proxy.
@@ -50,22 +50,30 @@ contract UpgradeTest is AnchoringFixture {
         anchoring.upgradeToAndCall(address(0xDEAD), "");
     }
 
-    /// At its own address the implementation has no owner and no corpus, so it takes no writes.
-    function test_the_implementation_takes_no_writes() public {
+    /// At its own address the implementation has no owner and no corpus, so it answers nothing:
+    /// a reader on the wrong address gets a revert, not an empty registry.
+    function test_the_implementation_answers_nothing_at_its_own_address() public {
         Anchoring impl = Anchoring(_implementation());
-        assertEq(impl.proxiableUUID(), IMPLEMENTATION_SLOT);
+        assertEq(impl.proxiableUUID(), IMPLEMENTATION_SLOT, "the one call an upgrade needs");
 
-        bytes[7] memory writes = [
+        bytes[14] memory calls = [
             abi.encodeCall(impl.addRegistry, ("us-ca1", "First Circuit", "{}")),
             abi.encodeCall(impl.addRecord, (_record(1, "sha256:0"))),
             abi.encodeCall(impl.updateRecordStatus, (1, 1, 1, "revoked")),
             abi.encodeCall(impl.grantRole, (1, "", alice, "admin")),
             abi.encodeCall(impl.revokeRole, (1, "", alice, "admin")),
             abi.encodeCall(impl.transferOwnership, (alice)),
-            abi.encodeCall(impl.upgradeToAndCall, (address(impl), ""))
+            abi.encodeCall(impl.upgradeToAndCall, (address(impl), "")),
+            abi.encodeCall(impl.owner, ()),
+            abi.encodeCall(impl.hasRole, (bytes32(0), alice)),
+            abi.encodeCall(impl.roleMemberCount, (bytes32(0))),
+            abi.encodeCall(impl.getRoleAdmin, (bytes32(0))),
+            abi.encodeCall(impl.records, (1, "", 0, 0, _page(0, 0))),
+            abi.encodeCall(impl.registries, (1, _page(0, 0))),
+            abi.encodeCall(impl.registriesByName, ("us-ca1", 1, _page(0, 0)))
         ];
-        for (uint256 i = 0; i < writes.length; i++) {
-            (bool ok, bytes memory reason) = address(impl).call(writes[i]);
+        for (uint256 i = 0; i < calls.length; i++) {
+            (bool ok, bytes memory reason) = address(impl).call(calls[i]);
             assertFalse(ok);
             assertEq(bytes4(reason), CallContextChecker.UnauthorizedCallContext.selector);
         }

@@ -409,19 +409,12 @@ contract AnchoringTest is AnchoringFixture {
         anchoring.transferOwnership(owner);
     }
 
-    /// Zero freezes the break-glass, for good as far as the contract is concerned.
-    function test_the_ownership_goes_to_zero() public {
-        uint64 id = _registry(alice);
+    /// Zero would freeze the break-glass and upgrades for good, so it is refused.
+    function test_the_ownership_never_goes_to_zero() public {
         _as(owner);
+        vm.expectRevert("new owner is the zero address");
         anchoring.transferOwnership(address(0));
-        assertEq(anchoring.owner(), address(0));
-
-        _as(owner);
-        vm.expectRevert("missing required role");
-        anchoring.grantRole(id, "", carol, Roles.ADMIN);
-        _as(owner);
-        vm.expectRevert("sender not the owner");
-        anchoring.transferOwnership(owner);
+        assertEq(anchoring.owner(), owner);
     }
 
     // ---- helpers ----

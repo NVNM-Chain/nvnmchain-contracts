@@ -10,7 +10,7 @@ import {IAnchoring} from "../../src/IAnchoring.sol";
 abstract contract AnchoringFixture is Test {
     Anchoring internal anchoring;
 
-    uint256 internal constant OWNER_SLOT = 11; // `owner` in `layout/anchoring.json`
+    uint256 internal constant OWNER_SLOT = 11; // `_owner` in `layout/anchoring.json`
 
     address internal owner = address(0xA0);
     address internal alice = address(0xA11CE);

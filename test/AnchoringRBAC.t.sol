@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {Test} from "forge-std/Test.sol";
+import {LibClone} from "solady/utils/LibClone.sol";
 import {AnchoringRBAC} from "../src/AnchoringRBAC.sol";
 import {Roles} from "../src/Roles.sol";
 
@@ -38,9 +39,10 @@ contract AnchoringRBACTest is Test {
     address internal bob = address(0xB0B);
     address internal carol = address(0xCA401);
 
-    /// As `AddRegistry` leaves it: the admin role administers itself, and alice holds it.
+    /// As `AddRegistry` leaves it: the admin role administers itself, and alice holds it. Behind
+    /// a proxy, since the views answer nowhere else.
     function setUp() public {
-        rbac = new RBACHarness();
+        rbac = RBACHarness(LibClone.deployERC1967(address(new RBACHarness())));
         rbac.setRoleAdmin(admin, admin);
         rbac.grantRoleUnchecked(admin, alice);
     }

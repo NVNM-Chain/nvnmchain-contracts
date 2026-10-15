@@ -13,6 +13,8 @@ where the precompile took only an EOA.
 The corpus arrives through the chain repo's dump writer (`x/anchoring/evmlayout`), not
 transactions, so `layout/` is an interface: the slot layout, the slots the contract writes for
 `test/SeedFixture.t.sol`'s corpus, and what Tempo deploys and places, from `test/Deployment.t.sol`.
+An upgrade keeps that layout: `upgradeToAndCall` checks only that the new code is UUPS, so pass
+`make layout-check` before deploying one.
 
 ## Develop
 
