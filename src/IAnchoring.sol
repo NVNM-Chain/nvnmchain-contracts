@@ -5,6 +5,8 @@ pragma solidity ^0.8.28;
 /// @notice The x/anchoring precompile's interface, copied from `HumanABI` in the chain's
 ///         `x/anchoring/precompile/anchoring.go`. Any change to a type or its order moves a
 ///         selector; `test/Selectors.t.sol` pins them.
+/// @dev Anyone may create a registry under any name and anchor any checksum in it, so a match
+///      by name or checksum vouches for nothing: filter by the registries you trust.
 interface IAnchoring {
     /// @param timestamp The block time, set by the chain, in Go's `time.Time.String()` form.
     /// @param isLatest Whether this is the newest version of its checksum.
@@ -33,7 +35,9 @@ interface IAnchoring {
     }
 
     /// The Cosmos paging pair. `key`/`nextKey` are a cursor `registries` and the unfiltered
-    /// `records` page use.
+    /// `records` page use; `countTotal` is ignored and only `registries` honours `reverse`. 200
+    /// rows at the field limits cost about 74M gas, past reth's default 50M `eth_call` cap; the
+    /// default 50 stay under 17M.
     struct PageRequest {
         bytes key;
         uint64 offset;
@@ -63,6 +67,8 @@ interface IAnchoring {
 
     function updateRecordStatus(uint64 registryId, uint64 recordId, uint64 index, string calldata status) external;
 
+    /// @notice With no filter a page can end short or empty with `nextKey` set: send it back, with
+    ///         offset 0, until it comes back empty. Records added behind the cursor are missed.
     function records(
         uint64 registryId,
         string calldata checksum,

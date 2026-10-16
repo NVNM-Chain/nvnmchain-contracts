@@ -20,6 +20,8 @@ contract DeploymentTest is Test {
 
         address proxy = LibClone.deployERC1967(impl);
         assertEq(keccak256(proxy.code), LibClone.ERC1967_CODE_HASH);
+        bytes32 slot = Anchoring(impl).proxiableUUID();
+        assertEq(vm.load(proxy, slot), bytes32(uint256(uint160(impl))), "creation wrote the pointer");
 
         _write("layout/anchoring.init.bin", init);
         _write("layout/anchoring.bin", impl.code);
@@ -27,6 +29,7 @@ contract DeploymentTest is Test {
         string memory json = "deployment";
         vm.serializeAddress(json, "factory", CREATE2_FACTORY);
         vm.serializeBytes32(json, "salt", SALT);
+        vm.serializeBytes32(json, "implementationSlot", slot);
         vm.writeJson(vm.serializeAddress(json, "implementation", impl), "layout/deployment.json");
     }
 

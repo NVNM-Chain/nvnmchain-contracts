@@ -13,11 +13,11 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 ///         events, over the whole `Record`.
 /// @dev Each method names the keeper function it ports. A caller sees eight differences: exact
 ///      name match folding ASCII case, timestamps with no sub-second part, shorter revert
-///      strings where one formats a value, no reason at all on a call carrying value, no role
-///      for the zero address, a checksum's registries in the order they first anchored it, an
-///      unfiltered record page that reads at most `MAX_PAGE_LIMIT` registries and hands back a
-///      cursor, and no EOA gate: the one the precompile had closed an IBC callback path this
-///      chain lacks.
+///      strings where one formats a value, a call carrying value refused by Tempo before it
+///      runs, no role for the zero address, a checksum's registries in the order they first
+///      anchored it, an unfiltered record page that reads at most `MAX_PAGE_LIMIT` registries
+///      and hands back a cursor, and no EOA gate: the one the precompile had closed an IBC
+///      callback path this chain lacks.
 ///      The storage layout is the migration's interface; `test/StorageLayout.t.sol` pins it.
 ///      It runs behind an ERC-1967 proxy at `0x…0a00`, which the owner upgrades; called at its
 ///      own address it answers nothing but `proxiableUUID`.
@@ -221,6 +221,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
 
     /// @dev `msgServer.UpdateParams`, in one step as ERC-173 has it. Zero is refused: it would
     ///      freeze the break-glass and upgrades, and nothing here could name an owner again.
+    ///      Roles stay: an admin the old owner seeded, itself included, keeps it until revoked.
     function transferOwnership(address newOwner) external onlyProxy onlyOwner {
         require(newOwner != address(0), "new owner is the zero address");
         _owner = newOwner;

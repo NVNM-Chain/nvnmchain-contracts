@@ -26,6 +26,26 @@ contract UpgradeTest is AnchoringFixture {
         assertEq(anchoring.addRegistry("us-ca9", "Ninth Circuit", "{}"), 2, "the count came through");
     }
 
+    function test_an_upgrade_runs_its_data_on_the_new_code() public {
+        Anchoring next = new Anchoring();
+        _as(owner);
+        anchoring.upgradeToAndCall(address(next), abi.encodeCall(Anchoring.transferOwnership, (carol)));
+
+        assertEq(_implementation(), address(next));
+        assertEq(anchoring.owner(), carol);
+    }
+
+    function test_an_upgrade_whose_data_reverts_changes_nothing() public {
+        address before = _implementation();
+        Anchoring next = new Anchoring();
+        _as(owner);
+        vm.expectRevert("new owner is the zero address");
+        anchoring.upgradeToAndCall(address(next), abi.encodeCall(Anchoring.transferOwnership, (address(0))));
+
+        assertEq(_implementation(), before);
+        assertEq(anchoring.owner(), owner);
+    }
+
     function test_no_one_else_upgrades() public {
         address next = address(new Anchoring());
         _as(alice);
