@@ -5,7 +5,8 @@ Application contracts for NVM.
 ## Anchoring
 
 `x/anchoring`'s precompile as a contract with the same ABI, at the same address on Tempo
-(`0x…0a00`); `src/Anchoring.sol` lists what a caller sees differently.
+(`0x…0a00`); `src/Anchoring.sol` lists what a caller sees differently, and `docs/migration.md`
+which build runs when, who owns it and what moves from the old chain.
 
 The corpus arrives through the chain repo's dump writer (`x/anchoring/evmlayout`), not
 transactions, so `layout/` is an interface: the slot layout, the slots the contract writes for
