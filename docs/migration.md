@@ -1,63 +1,80 @@
 # Migrating from the precompile
 
-The anchoring contract takes over from the old chain's `x/anchoring` precompile (L2) on Tempo
-(L1), at the same address, `0x…0a00`.
+On the old chain (L2), anchoring was the `x/anchoring` precompile. On Tempo (L1) it is a contract
+at the same address, `0x…0a00`, holding the same data.
 
-## Interface
+## What stays the same
 
-The precompile's eight methods and five events have the same selectors, topics and indexed fields;
-`test/Selectors.t.sol` pins the selectors and topics. A caller changes RPC and chain id. The
-contract adds role views (`hasRole`, `roleMemberCount`, `getRoleAdmin`), ERC-173 ownership and
-the UUPS upgrade (`upgradeToAndCall`, `Upgraded`).
+The eight methods and five events keep the same selectors, event topics and indexed fields, and
+`test/Selectors.t.sol` pins them. A client only needs a new RPC URL and chain id.
 
-Same selectors do not mean identical behavior. From T12 a caller sees:
+The contract also adds:
 
-- An exact name is an `eth_call` to `registriesByName`, ignoring ASCII case. Prefix, suffix and
-  contains revert there; they are the node's `anchoring_searchRegistriesByName` RPC, served when
-  it runs with `--anchoring.name-index`.
-- `timestamp` and `createdAt` keep the old chain's string form, but Tempo's block time is whole
-  seconds: a row written on Tempo reads `2026-10-20 01:35:45 +0000 UTC` where the old chain wrote
-  `2026-07-30 15:04:00.973906311 +0000 UTC`. Timestamps copied from the old chain still have nanoseconds.
-- Revert strings that format a value are shorter, and a call carrying value is refused.
-- `grantRole` refuses the zero address. The old chain accepted it and counted it as an admin
-  when checking that a registry keeps one, so the last real admin could make it admin, revoke
-  the role from themselves and leave the registry with no admin anyone controls.
-- A checksum's registries come in the order they first anchored it, ascending for the corpus.
-- The unfiltered record page reads at most 200 registries and returns a cursor.
-- No EOA gate; the precompile had one to close an IBC callback path Tempo lacks.
+- role views: `hasRole`, `roleMemberCount`, `getRoleAdmin`;
+- from T12, ownership (`owner`, `transferOwnership`) and upgrades (`upgradeToAndCall`,
+  `Upgraded`).
 
-The launch build differs in the first three only.
+## What behaves differently
 
-## Builds
+Same selectors do not mean identical behavior. From T12:
+
+- **Name search.** `registriesByName` answers exact matches only, ignoring ASCII case; call it
+  with `eth_call`. Prefix, suffix and contains searches revert. A node started with
+  `--anchoring.name-index` serves them through the `anchoring_searchRegistriesByName` RPC.
+- **Timestamps.** `timestamp` and `createdAt` keep the old string format, but Tempo's block time
+  is whole seconds. A row written on Tempo reads `2026-07-30 15:04:00 +0000 UTC`, where the old
+  chain wrote `2026-07-30 15:04:00.973906311 +0000 UTC`. Copied timestamps keep the nanoseconds.
+- **Errors.** Revert messages leave out values: `registry does not exist`, not
+  `registry 7 does not exist`. A call that sends value is refused.
+- **Zero address.** `grantRole` refuses the zero address. The old chain accepted it and counted it
+  as an admin, so a registry's last real admin could make the zero address admin, step down, and
+  leave the registry with no admin anyone controls.
+- **Lookup by checksum.** `records` with only a checksum lists registries in the order each first
+  anchored that checksum. The old chain listed them by ascending id, and copied data keeps that
+  order.
+- **Listing all records.** `records` with no filter reads at most 200 registries per call, so a
+  page can come back short, or empty, before the end. Pass `pagination.nextKey` back with offset
+  0 until `nextKey` comes back empty.
+- **Contract callers.** Contracts may call every method. The old chain took writes only from EOAs,
+  to block an IBC callback path that Tempo does not have.
+
+Before T12, only the first three apply.
+
+## Which code runs
 
 | | Code at `0x…0a00` | Owner |
 |---|---|---|
-| Before T12 | the launch build, `5b6b126`, keccak `0x893a…7c0e`; only EOAs write | none |
-| From T12 | `layout/proxy.bin`, keccak `0xaaa5…890d`, over `deployment.json`'s `implementation` | `_owner`, slot 11 |
+| Before T12 | the launch build, commit `5b6b126`, keccak `0x893a…7c0e`; only EOAs may write | none |
+| From T12 | the proxy `layout/proxy.bin`, keccak `0xaaa5…890d`, over the implementation in `deployment.json` | storage slot 11 |
 
-T12 puts the proxy over the launch build once the implementation is deployed, and copies the
-validator registry's owner into slot 11. A chain that starts at T12 has the proxy from genesis,
-with the owner its genesis names. The testnet launched on the launch build and takes T12 as a hard
-fork; mainnet starts at T12.
+At the first block from T12 in which the implementation is deployed, the chain swaps the launch
+build for the proxy and copies `ValidatorConfigV2`'s owner into slot 11. Until then the launch
+build keeps running. A chain that starts at T12 has the proxy from genesis, with the owner named
+in genesis.
 
-## State
+The testnet launched on the launch build and switches at T12. Mainnet starts at T12.
 
-The chain repo's dump writer puts the corpus into genesis: every registry, record version,
-status, role and index, under the same ids. What the old chain records after the snapshot is not
-in it, so the snapshot is taken from a chain that has stopped.
+## Data
+
+The data comes from a snapshot of the old chain running the chain repo's `841ce88`. The dump writer
+in the chain repo (`x/anchoring/evmlayout`) turns that snapshot into Tempo's genesis state: every
+registry, record version, status, role and index, under the same ids.
+
+Nothing written on the old chain after the snapshot is copied.
 
 ## Ownership
 
-The old chain's module admin is a Cosmos multisig that no EVM key signs for. The dump keeps its
-address in `_formerAdmin`, which nothing reads. On Tempo the owner seeds registry admins,
-upgrades the implementation and hands itself on; it holds no role, though it can seed one for any
-address, its own included.
+The old chain's module admin was a Cosmos multisig with no EVM key. The migration keeps that
+address in `_formerAdmin`, a slot nothing reads.
 
-Registry roles carry over as they are, and a key has the same address on both chains, so whoever
+On Tempo the owner can make any address a registry admin, upgrade the implementation and transfer
+ownership. The owner holds no registry role unless it grants one to itself.
+
+Registry roles are copied as they are, and a key has the same address on both chains, so whoever
 administered a registry on the old chain still does on Tempo. A registry whose only admin cannot
-sign on Tempo, such as registry 1, stays frozen until the owner seeds an admin.
+sign on Tempo, such as registry 1, stays frozen until the owner appoints a new admin.
 
 ## Funds
 
-The contract holds none and Tempo refuses calls to it that carry value. Account balances are not
-anchoring state and do not move with it.
+The contract holds no funds, and Tempo refuses any call to it that sends value. Account balances
+are not anchoring data, so the migration does not move them.
