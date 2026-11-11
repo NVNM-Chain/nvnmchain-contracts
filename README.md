@@ -15,6 +15,9 @@ transactions, so `layout/` is an interface: the slot layout, the slots the contr
 `implementationSlot` holding `implementation`. That is deployed through `factory` with `salt`, as
 its runtime holds the address: anywhere else it answers direct calls and no upgrade returns to it.
 
+`anchoring.init.bin` is the build Tempo pins at T12, so it stays as it is whatever `src/` becomes.
+`upgrade.init.bin` is this source's build, which the owner deploys and upgrades to.
+
 An upgrade must leave every entry of `layout/anchoring.json` where it is: `upgradeToAndCall`
 checks only that the new code is UUPS, and `make layout-check` fails on any code change.
 

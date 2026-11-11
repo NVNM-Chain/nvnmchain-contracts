@@ -5,14 +5,14 @@ import {Test} from "forge-std/Test.sol";
 import {LibClone} from "solady/utils/LibClone.sol";
 import {Anchoring} from "../src/Anchoring.sol";
 
-/// Writes what Tempo deploys and places: the implementation's creation code, the address
-/// Arachnid's factory (forge's, and in Tempo's genesis) gives it, the runtime there, which holds
-/// that address, and the proxy's runtime. Regenerate with `make layout`.
+/// Writes what Tempo deploys and places at T12 from `layout/anchoring.init.bin`, the build it pins:
+/// the address Arachnid's factory (forge's, and in Tempo's genesis) gives it, the runtime there,
+/// which holds that address, and the proxy's runtime.
 contract DeploymentTest is Test {
     bytes32 internal constant SALT = bytes32(0);
 
     function test_write_the_deployment() public {
-        bytes memory init = type(Anchoring).creationCode;
+        bytes memory init = vm.parseBytes(vm.trim(vm.readFile("layout/anchoring.init.bin")));
         (bool ok, bytes memory deployed) = CREATE2_FACTORY.call(abi.encodePacked(SALT, init));
         assertTrue(ok, "the factory deploys it");
         address impl = address(bytes20(deployed));
@@ -23,7 +23,6 @@ contract DeploymentTest is Test {
         bytes32 slot = Anchoring(impl).proxiableUUID();
         assertEq(vm.load(proxy, slot), bytes32(uint256(uint160(impl))), "creation wrote the pointer");
 
-        _write("layout/anchoring.init.bin", init);
         _write("layout/anchoring.bin", impl.code);
         _write("layout/proxy.bin", proxy.code);
         string memory json = "deployment";

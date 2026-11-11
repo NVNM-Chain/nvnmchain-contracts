@@ -50,7 +50,7 @@ Before T12, only the first three apply.
 At the first block from T12 in which the implementation is deployed, the chain swaps the launch
 build for the proxy and copies `ValidatorConfigV2`'s owner into slot 11. Until then the launch
 build keeps running. A chain that starts at T12 has the proxy from genesis, with the owner named
-in genesis.
+in genesis. The owner can then upgrade it to the current build, `layout/upgrade.init.bin`.
 
 The testnet launched on the launch build and switches at T12. Mainnet starts at T12.
 
