@@ -1,6 +1,6 @@
 # nvnmchain-contracts
 
-Application contracts for NVM.
+Application contracts for NVNM.
 
 ## Anchoring
 

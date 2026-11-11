@@ -35,9 +35,11 @@ interface IAnchoring {
     }
 
     /// The Cosmos paging pair. `key`/`nextKey` are a cursor `registries` and the unfiltered
-    /// `records` page use; `countTotal` is ignored and only `registries` honours `reverse`. 200
-    /// rows at the field limits cost about 74M gas, past reth's default 50M `eth_call` cap; the
-    /// default 50 stay under 17M.
+    /// `records` page use. Every other page refuses a key and pages by `offset` alone: raise it
+    /// until a page comes back empty. Pin every call of a walk to one block to read one snapshot.
+    /// `countTotal` is ignored and only `registries` honours `reverse`. 200 rows at the field
+    /// limits cost about 74M gas, past reth's default 50M `eth_call` cap; the default 50 stay
+    /// under 17M.
     struct PageRequest {
         bytes key;
         uint64 offset;

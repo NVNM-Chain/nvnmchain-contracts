@@ -433,8 +433,6 @@ contract AnchoringTest is AnchoringFixture {
         assertEq(anchoring.owner(), owner);
     }
 
-    // ---- helpers ----
-
     /// The break-glass: a registry admin lands, and no other role does.
     function test_the_owner_can_install_a_registry_admin() public {
         uint64 id = _registry(alice);
@@ -447,6 +445,8 @@ contract AnchoringTest is AnchoringFixture {
         vm.expectRevert("missing required role");
         anchoring.grantRole(id, "", carol, Roles.EDITOR);
     }
+
+    // ---- helpers ----
 
     function _expectAddRecordRevert(IAnchoring.Record memory r, string memory reason) private {
         _as(alice);

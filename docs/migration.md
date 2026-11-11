@@ -19,8 +19,9 @@ The contract also adds:
 Same selectors do not mean identical behavior. From T12:
 
 - **Name search.** `registriesByName` answers exact matches only, ignoring ASCII case; call it
-  with `eth_call`. Prefix, suffix and contains searches revert. A node started with
-  `--anchoring.name-index` serves them through the `anchoring_searchRegistriesByName` RPC.
+  with `eth_call`. It returns no `nextKey`, where the old chain returned the next match's id.
+  Prefix, suffix and contains searches revert. A node started with `--anchoring.name-index`
+  serves them through the `anchoring_searchRegistriesByName` RPC.
 - **Timestamps.** `timestamp` and `createdAt` keep the old string format, but Tempo's block time
   is whole seconds. A row written on Tempo reads `2026-07-30 15:04:00 +0000 UTC`, where the old
   chain wrote `2026-07-30 15:04:00.973906311 +0000 UTC`. Copied timestamps keep the nanoseconds.
@@ -35,6 +36,9 @@ Same selectors do not mean identical behavior. From T12:
 - **Listing all records.** `records` with no filter reads at most 200 registries per call, so a
   page can come back short, or empty, before the end. Pass `pagination.nextKey` back with offset
   0 until `nextKey` comes back empty.
+- **Paging keys.** Only `registries` and `records` with no filter take `pagination.key`. Every
+  other page pages by `offset`: raise it until a page comes back empty. The T12 build ignores a
+  key there, as the old chain did; `layout/upgrade.init.bin` refuses one.
 - **Contract callers.** Contracts may call every method. The old chain took writes only from EOAs,
   to block an IBC callback path that Tempo does not have.
 

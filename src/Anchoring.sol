@@ -11,8 +11,9 @@ import {UUPSUpgradeable} from "solady/utils/UUPSUpgradeable.sol";
 /// @title Anchoring
 /// @notice x/anchoring with its state in EVM storage: the precompile's methods, selectors and
 ///         events, over the whole `Record`.
-/// @dev Each method names the keeper function it ports. A caller sees eight differences: exact
-///      name match folding ASCII case, timestamps with no sub-second part, shorter revert
+/// @dev Each method names the keeper function it ports. A caller sees nine differences: exact
+///      name match folding ASCII case, a pagination key refused by every page but `registries`
+///      and the unfiltered record page, timestamps with no sub-second part, shorter revert
 ///      strings where one formats a value, a call carrying value refused by Tempo before it
 ///      runs, no role for the zero address, a checksum's registries in the order they first
 ///      anchored it, an unfiltered record page that reads at most `MAX_PAGE_LIMIT` registries
@@ -36,6 +37,10 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
     /// Paging, from `keeper/query.go`.
     uint64 internal constant DEFAULT_PAGE_LIMIT = 50;
     uint64 internal constant MAX_PAGE_LIMIT = 200;
+
+    /// A page without a cursor refuses a key, which the module ignored: a client resuming from one
+    /// would get the first page back and could not tell.
+    string internal constant OFFSET_ONLY = "pagination key not supported; page by offset";
 
     /// `types.RegistryNameMatchMode`: 0/1 exact, 2 prefix, 3 suffix, 4 contains.
     uint8 internal constant MATCH_EXACT = 1;
@@ -272,9 +277,11 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         (uint64 offset, uint64 limit) = _page(pagination);
 
         if (registryId != 0) {
+            require(pagination.key.length == 0, OFFSET_ONLY);
             return (_pageOfRegistry(registryId, offset, limit), paginationOut);
         }
         if (bytes(checksum).length != 0) {
+            require(pagination.key.length == 0, OFFSET_ONLY);
             return (_pageOfChecksum(checksum, offset, limit), paginationOut);
         }
         require(
@@ -340,6 +347,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         // `SearchRegistriesByName` checks the mode first too. An empty name is a mistake, not
         // an empty page.
         require(bytes(name).length != 0, "name must be provided");
+        require(pagination.key.length == 0, OFFSET_ONLY);
 
         (uint64 offset, uint64 limit) = _page(pagination);
         uint64[] storage ids = _registriesByName[_lower(name)];

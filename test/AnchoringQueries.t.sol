@@ -244,6 +244,20 @@ contract AnchoringQueriesTest is AnchoringFixture {
         anchoring.records(0, "", 0, 0, _cursor(hex"01", 1, false));
     }
 
+    /// The unfiltered page's own cursor, sent to each page that takes none.
+    function test_a_page_without_a_cursor_refuses_a_key() public {
+        uint64 id = _registryWith(2);
+        (, IAnchoring.PageResponse memory page) = anchoring.records(0, "", 0, 0, _page(0, 1));
+        IAnchoring.PageRequest memory resume = _cursor(page.nextKey, 1, false);
+
+        vm.expectRevert("pagination key not supported; page by offset");
+        anchoring.records(id, "", 0, 0, resume);
+        vm.expectRevert("pagination key not supported; page by offset");
+        anchoring.records(0, "c1", 0, 0, resume);
+        vm.expectRevert("pagination key not supported; page by offset");
+        anchoring.registriesByName("us-ca1", 1, resume);
+    }
+
     // ---- registries ----
 
     function test_a_registry_id_returns_just_that_one() public {
