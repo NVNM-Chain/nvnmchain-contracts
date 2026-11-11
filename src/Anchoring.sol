@@ -357,6 +357,7 @@ contract Anchoring is IAnchoring, AnchoringRBAC, UUPSUpgradeable {
         for (uint256 i = 0; i < n; i++) {
             registriesOut[i] = _registries[ids[offset + i]];
         }
+        return (registriesOut, paginationOut);
     }
 
     // ---- gates and validation ----
