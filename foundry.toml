@@ -12,7 +12,7 @@ extra_output = ["storageLayout"]
 bytecode_hash = "none"
 # test/SeedFixture.t.sol writes layout/seed-fixture.json.
 fs_permissions = [{ access = "read-write", path = "./layout" }]
-# solady/forge-std pinned as git submodules (same commits as tips/verify/lib).
+# solady and forge-std are pinned git submodules.
 remappings = [
     "solady/=lib/solady/src/",
     "forge-std/=lib/forge-std/src/",
