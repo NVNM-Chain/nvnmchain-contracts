@@ -18,6 +18,7 @@ layout:
 	@forge inspect Anchoring storage-layout --json | $(STRIP_AST_IDS) > layout/anchoring.json
 	@forge inspect Anchoring abi --json > layout/anchoring.abi.json
 	@forge inspect Anchoring bytecode > layout/upgrade.init.bin
+	@forge inspect FeeSplitter bytecode > layout/fee-splitter.init.bin
 	@forge test --match-path 'test/{SeedFixture,Deployment}.t.sol' >/dev/null
 
 layout-check: layout
