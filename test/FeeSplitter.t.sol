@@ -135,6 +135,17 @@ contract FeeSplitterTest is Test {
         assertEq(splitter.claim(address(usd), 0), 200_000);
     }
 
+    function test_a_claim_splits_what_arrived_since_the_last_split() public {
+        vm.prank(OWNER);
+        splitter.commence();
+        fees.credit(address(splitter), address(usd), 1_000_000);
+
+        assertEq(splitter.claim(address(usd), 0), 100_000);
+        assertEq(usd.balanceOf(DEV), 250_000);
+        assertEq(usd.balanceOf(BUY), 250_000);
+        assertEq(splitter.owed(address(usd), 1), 100_000);
+    }
+
     function test_only_the_owner_commences_and_only_once() public {
         vm.expectRevert(Ownable.Unauthorized.selector);
         splitter.commence();

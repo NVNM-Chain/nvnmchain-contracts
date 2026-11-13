@@ -75,7 +75,7 @@ contract FeeSplitter is Ownable {
 
     /// @notice Collect `token` fees from FeeManager and divide everything not yet held. Permissionless. A
     ///         remainder too small to divide among the operators waits for the next split.
-    function split(address token) external returns (uint256 fresh) {
+    function split(address token) public returns (uint256 fresh) {
         IFeeManager(FEE_MANAGER).distributeFees(address(this), token);
         fresh = SafeTransferLib.balanceOf(token, address(this)) - held[token];
         uint256 dev = fresh * devshareBps / BPS;
@@ -96,10 +96,11 @@ contract FeeSplitter is Ownable {
         emit Commenced();
     }
 
-    /// @notice Pay operator `i` what is held for it in `token`. Permissionless once commenced.
+    /// @notice Split, then pay operator `i` what is held for it in `token`. Permissionless once commenced.
     function claim(address token, uint256 i) external returns (uint256 amount) {
         if (!commenced) revert NotCommenced();
         address to = operators[i];
+        split(token);
         amount = owed(token, i);
         paid[token][i] = perOperator[token];
         held[token] -= amount;
