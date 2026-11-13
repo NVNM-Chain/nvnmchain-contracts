@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 pragma solidity ^0.8.28;
 
-import {Test, stdError} from "forge-std/Test.sol";
+import {Test} from "forge-std/Test.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {FeeSplitter} from "../src/FeeSplitter.sol";
+
+Token constant USD = Token(0x20C0000000000000000000000000000000000000);
 
 contract Token is ERC20 {
     function name() public pure override returns (string memory) {
@@ -28,9 +30,9 @@ contract Token is ERC20 {
 contract MockFeeManager {
     mapping(address => mapping(address => uint256)) public collectedFees;
 
-    function credit(address recipient, address token, uint256 amount) external {
-        Token(token).mint(address(this), amount);
-        collectedFees[recipient][token] += amount;
+    function credit(address recipient, uint256 amount) external {
+        USD.mint(address(this), amount);
+        collectedFees[recipient][address(USD)] += amount;
     }
 
     function distributeFees(address validator, address token) external {
@@ -44,107 +46,82 @@ contract FeeSplitterTest is Test {
     address constant OWNER = address(0xA0);
     address constant DEV = address(0xD0);
     address constant BUY = address(0xB0);
+    address constant OPERATOR = address(0x101);
 
     MockFeeManager fees;
-    Token usd;
     FeeSplitter splitter;
-    address[] ops;
 
     function setUp() public {
+        vm.etch(address(USD), address(new Token()).code);
         vm.etch(0xfeEC000000000000000000000000000000000000, address(new MockFeeManager()).code);
         fees = MockFeeManager(0xfeEC000000000000000000000000000000000000);
-        vm.etch(0x20C0000000000000000000000000000000000000, address(new Token()).code);
-        usd = Token(0x20C0000000000000000000000000000000000000);
-        for (uint160 i = 1; i <= 5; ++i) {
-            ops.push(address(0x100 + i));
-        }
-        splitter = new FeeSplitter(OWNER, DEV, BUY, 2_500, 2_500, ops);
+        splitter = new FeeSplitter(OWNER, DEV, BUY, 2_500, 2_500, OPERATOR);
     }
 
-    function test_split_pays_the_cuts_and_holds_a_tenth_for_each_operator() public {
-        fees.credit(address(splitter), address(usd), 1_000_000);
+    function test_split_pays_the_cuts_and_holds_the_rest() public {
+        fees.credit(address(splitter), 1_000_000);
         assertEq(splitter.split(), 1_000_000);
 
-        assertEq(usd.balanceOf(DEV), 250_000);
-        assertEq(usd.balanceOf(BUY), 250_000);
-        for (uint256 i; i < 5; ++i) {
-            assertEq(splitter.owed(i), 100_000);
-        }
+        assertEq(USD.balanceOf(DEV), 250_000);
+        assertEq(USD.balanceOf(BUY), 250_000);
         assertEq(splitter.held(), 500_000);
-        assertEq(usd.balanceOf(address(splitter)), 500_000);
+        assertEq(USD.balanceOf(address(splitter)), 500_000);
     }
 
     /// Anyone may call `distributeFees` before the splitter exists; what arrived early is split too.
     function test_split_takes_a_balance_paid_out_before_it_was_deployed() public {
-        usd.mint(address(splitter), 400_000);
-        fees.credit(address(splitter), address(usd), 600_000);
+        USD.mint(address(splitter), 400_000);
+        fees.credit(address(splitter), 600_000);
         assertEq(splitter.split(), 1_000_000);
-        assertEq(usd.balanceOf(DEV), 250_000);
+        assertEq(USD.balanceOf(DEV), 250_000);
     }
 
     function test_held_shares_are_not_split_again() public {
-        fees.credit(address(splitter), address(usd), 1_000_000);
+        fees.credit(address(splitter), 1_000_000);
         splitter.split();
         assertEq(splitter.split(), 0);
 
-        fees.credit(address(splitter), address(usd), 2_000_000);
+        fees.credit(address(splitter), 2_000_000);
         assertEq(splitter.split(), 2_000_000);
-        assertEq(usd.balanceOf(DEV), 750_000);
-        assertEq(splitter.owed(4), 300_000);
+        assertEq(USD.balanceOf(DEV), 750_000);
+        assertEq(splitter.held(), 1_500_000);
     }
 
-    function test_a_remainder_waits_for_the_next_split() public {
-        fees.credit(address(splitter), address(usd), 1_003);
+    function test_rounding_goes_to_the_validator() public {
+        fees.credit(address(splitter), 1_003);
         splitter.split();
-        // 1,003 - 250 - 250 = 503 for five operators: 100 each, 3 left over.
-        assertEq(splitter.owed(0), 100);
-        assertEq(splitter.held(), 500);
-        assertEq(splitter.split(), 3);
-    }
-
-    function test_nothing_is_owed_past_the_last_operator() public {
-        fees.credit(address(splitter), address(usd), 1_000_000);
-        splitter.split();
-        vm.expectRevert(stdError.indexOOBError);
-        splitter.owed(5);
+        assertEq(USD.balanceOf(DEV), 250);
+        assertEq(splitter.held(), 503);
+        assertEq(splitter.split(), 0);
     }
 
     function test_nothing_is_claimable_before_commencement() public {
-        fees.credit(address(splitter), address(usd), 1_000_000);
+        fees.credit(address(splitter), 1_000_000);
         splitter.split();
         vm.expectRevert(FeeSplitter.NotCommenced.selector);
-        splitter.claim(0);
+        splitter.claim();
     }
 
-    function test_after_commencement_anyone_pays_an_operator_its_share() public {
-        fees.credit(address(splitter), address(usd), 1_000_000);
+    function test_after_commencement_anyone_pays_the_operator_what_is_held() public {
+        fees.credit(address(splitter), 1_000_000);
         splitter.split();
         vm.prank(OWNER);
         splitter.commence();
 
-        assertEq(splitter.claim(2), 100_000);
-        assertEq(usd.balanceOf(ops[2]), 100_000);
-        assertEq(splitter.claim(2), 0);
-        assertEq(splitter.held(), 400_000);
-        // What is left is held for the other four, so a split finds nothing new.
-        assertEq(splitter.split(), 0);
-
-        // A later split owes the paid operator only its part of that one.
-        fees.credit(address(splitter), address(usd), 1_000_000);
-        splitter.split();
-        assertEq(splitter.claim(2), 100_000);
-        assertEq(splitter.claim(0), 200_000);
+        assertEq(splitter.claim(), 500_000);
+        assertEq(USD.balanceOf(OPERATOR), 500_000);
+        assertEq(splitter.held(), 0);
+        assertEq(splitter.claim(), 0);
     }
 
     function test_a_claim_splits_what_arrived_since_the_last_split() public {
         vm.prank(OWNER);
         splitter.commence();
-        fees.credit(address(splitter), address(usd), 1_000_000);
+        fees.credit(address(splitter), 1_000_000);
 
-        assertEq(splitter.claim(0), 100_000);
-        assertEq(usd.balanceOf(DEV), 250_000);
-        assertEq(usd.balanceOf(BUY), 250_000);
-        assertEq(splitter.owed(1), 100_000);
+        assertEq(splitter.claim(), 500_000);
+        assertEq(USD.balanceOf(DEV), 250_000);
+        assertEq(USD.balanceOf(BUY), 250_000);
     }
 
     function test_only_the_owner_commences_and_only_once() public {
@@ -162,32 +139,31 @@ contract FeeSplitterTest is Test {
         splitter.renounceOwnership();
     }
 
-    function test_only_an_operator_moves_its_payout() public {
-        fees.credit(address(splitter), address(usd), 1_000_000);
-        splitter.split();
+    function test_only_the_operator_moves_its_payout() public {
         vm.prank(OWNER);
         vm.expectRevert(FeeSplitter.NotOperator.selector);
-        splitter.moveOperator(1, OWNER);
+        splitter.moveOperator(OWNER);
+        vm.prank(OPERATOR);
+        vm.expectRevert(FeeSplitter.ZeroAddress.selector);
+        splitter.moveOperator(address(0));
 
         address moved = address(0xC1);
-        vm.prank(ops[1]);
-        splitter.moveOperator(1, moved);
+        vm.prank(OPERATOR);
+        splitter.moveOperator(moved);
+        fees.credit(address(splitter), 1_000_000);
         vm.prank(OWNER);
         splitter.commence();
-        splitter.claim(1);
-        assertEq(usd.balanceOf(moved), 100_000);
-        assertEq(usd.balanceOf(ops[1]), 0);
+        splitter.claim();
+        assertEq(USD.balanceOf(moved), 500_000);
+        assertEq(USD.balanceOf(OPERATOR), 0);
     }
 
     function test_the_constructor_refuses_a_bad_split() public {
         vm.expectRevert(FeeSplitter.InvalidBps.selector);
-        new FeeSplitter(OWNER, DEV, BUY, 9_000, 2_000, ops);
+        new FeeSplitter(OWNER, DEV, BUY, 9_000, 2_000, OPERATOR);
         vm.expectRevert(FeeSplitter.InvalidBps.selector);
-        new FeeSplitter(OWNER, DEV, BUY, 2_500, 1_999, ops);
-        vm.expectRevert(FeeSplitter.NoOperators.selector);
-        new FeeSplitter(OWNER, DEV, BUY, 2_500, 2_500, new address[](0));
-        ops[3] = address(0);
+        new FeeSplitter(OWNER, DEV, BUY, 2_500, 1_999, OPERATOR);
         vm.expectRevert(FeeSplitter.ZeroAddress.selector);
-        new FeeSplitter(OWNER, DEV, BUY, 2_500, 2_500, ops);
+        new FeeSplitter(OWNER, DEV, BUY, 2_500, 2_500, address(0));
     }
 }
