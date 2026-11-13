@@ -117,6 +117,7 @@ contract FeeSplitter is Ownable {
 
     /// @notice The validators' share held for operator `i` in `token`.
     function owed(address token, uint256 i) public view returns (uint256) {
+        operators[i]; // past the last operator, reverts as `claim` does
         return perOperator[token] - paid[token][i];
     }
 

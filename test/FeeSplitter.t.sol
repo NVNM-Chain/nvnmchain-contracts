@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 pragma solidity ^0.8.28;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, stdError} from "forge-std/Test.sol";
 import {Ownable} from "solady/auth/Ownable.sol";
 import {ERC20} from "solady/tokens/ERC20.sol";
 import {FeeSplitter} from "../src/FeeSplitter.sol";
@@ -99,6 +99,13 @@ contract FeeSplitterTest is Test {
         assertEq(splitter.owed(address(usd), 0), 100);
         assertEq(splitter.held(address(usd)), 500);
         assertEq(splitter.split(address(usd)), 3);
+    }
+
+    function test_nothing_is_owed_past_the_last_operator() public {
+        fees.credit(address(splitter), address(usd), 1_000_000);
+        splitter.split(address(usd));
+        vm.expectRevert(stdError.indexOOBError);
+        splitter.owed(address(usd), 5);
     }
 
     function test_nothing_is_claimable_before_commencement() public {
